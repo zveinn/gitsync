@@ -242,6 +242,7 @@ impl Db {
             }
 
             tx.execute("DELETE FROM links WHERE from_id = ?1", params![id])?;
+            let self_repo = format!("{}/{}", item.owner, item.repo);
             for link in &item.links {
                 let to_id: Option<i64> = tx
                     .query_row(
@@ -257,6 +258,14 @@ impl Db {
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![id, link.repo, link.number, to_id, link.kind.as_str()],
                 )?;
+                // Hydrating either side should nest the issue under the PR.
+                if let Some(other_id) = to_id {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO links(from_id, to_repo, to_number, to_id, kind)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![other_id, self_repo, item.number, id, link.kind.as_str()],
+                    )?;
+                }
             }
 
             tx.commit()?;
@@ -359,6 +368,7 @@ impl Db {
                     roles: BTreeSet::new(),
                     approvals: 0,
                     review_total: 0,
+                    links: Vec::new(),
                 })
             })?;
 
@@ -388,6 +398,7 @@ impl Db {
                     item.roles = map.remove(&item.id).unwrap_or_default();
                 }
                 attach_review_progress(c, &mut items)?;
+                attach_links(c, &mut items)?;
             }
             Ok(items)
         })
@@ -455,6 +466,7 @@ impl Db {
                                 roles: BTreeSet::new(),
                                 approvals: 0,
                                 review_total: 0,
+                                links: Vec::new(),
                             },
                             r.get::<_, String>(15)?,
                             r.get::<_, Option<String>>(16)?,
@@ -551,10 +563,11 @@ impl Db {
 
             let mut links = Vec::new();
             let mut stmt = c.prepare(
-                "SELECT l.to_repo, l.to_number, l.kind, i.title, i.state
+                "SELECT l.to_repo, l.to_number, l.kind, i.title, i.state, l.to_id
                  FROM links l
                  LEFT JOIN items i ON i.id = l.to_id
-                 WHERE l.from_id = ?1",
+                 WHERE l.from_id = ?1
+                 ORDER BY CASE l.kind WHEN 'closes' THEN 0 ELSE 1 END, l.to_number",
             )?;
             let rs = stmt.query_map(params![id], |r| {
                 Ok(IssueLink {
@@ -565,6 +578,7 @@ impl Db {
                     state: r
                         .get::<_, Option<String>>(4)?
                         .map(|s| ItemState::parse(&s)),
+                    to_id: r.get(5)?,
                 })
             })?;
             for l in rs {
@@ -727,6 +741,40 @@ fn attach_review_progress(c: &Connection, items: &mut [ItemRow]) -> Result<()> {
     Ok(())
 }
 
+fn attach_links(c: &Connection, items: &mut [ItemRow]) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = items.iter().map(|i| i.id.to_string()).collect();
+    let in_list = ids.join(",");
+    let mut map: std::collections::HashMap<i64, Vec<IssueLink>> = std::collections::HashMap::new();
+    let mut stmt = c.prepare(&format!(
+        "SELECT l.from_id, l.to_repo, l.to_number, l.kind, i.title, i.state, l.to_id
+         FROM links l
+         LEFT JOIN items i ON i.id = l.to_id
+         WHERE l.from_id IN ({in_list})
+         ORDER BY CASE l.kind WHEN 'closes' THEN 0 ELSE 1 END, l.to_number"
+    ))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        map.entry(id).or_default().push(IssueLink {
+            repo: row.get(1)?,
+            number: row.get(2)?,
+            kind: LinkKind::parse(&row.get::<_, String>(3)?),
+            title: row.get(4)?,
+            state: row
+                .get::<_, Option<String>>(5)?
+                .map(|s| ItemState::parse(&s)),
+            to_id: row.get(6)?,
+        });
+    }
+    for item in items {
+        item.links = map.remove(&item.id).unwrap_or_default();
+    }
+    Ok(())
+}
+
 fn apply_view_filter(sql: &mut String, view: View) {
     match view {
         View::Inbox => {
@@ -885,6 +933,12 @@ mod tests {
         let stats = db.stats().unwrap();
         assert_eq!(stats.prs, 1);
         assert_eq!(stats.unread, 1);
+        assert!(
+            rows[0]
+                .nested_links()
+                .any(|l| l.number == 1 && l.kind == LinkKind::Closes),
+            "PR should nest the issue it closes"
+        );
     }
 
     #[test]

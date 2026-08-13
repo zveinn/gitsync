@@ -11,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::model::{ItemDetail, ItemQuery, ItemRow, StateFilter, TimeRange, View};
+use crate::model::{ItemDetail, ItemQuery, ItemRow, Kind, StateFilter, TimeRange, View};
 use crate::sync::{SyncCmd, SyncEvent, SyncKind};
 
 pub fn run(
@@ -59,6 +59,12 @@ enum StatusKind {
     Err,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum FlatRow {
+    Item(usize),
+    Child { parent: usize, link: usize },
+}
+
 pub(crate) struct App {
     db: Db,
     cfg: Config,
@@ -66,6 +72,7 @@ pub(crate) struct App {
     cmd_tx: UnboundedSender<SyncCmd>,
     query: ItemQuery,
     items: Vec<ItemRow>,
+    flat: Vec<FlatRow>,
     counts: Vec<(View, usize)>,
     selected: usize,
     table_state: ratatui::widgets::TableState,
@@ -108,6 +115,7 @@ impl App {
             cmd_tx,
             query,
             items: Vec::new(),
+            flat: Vec::new(),
             counts: Vec::new(),
             selected: 0,
             table_state: ratatui::widgets::TableState::default(),
@@ -366,31 +374,31 @@ impl App {
             }
             return;
         }
-        if self.items.is_empty() {
+        if self.flat.is_empty() {
             return;
         }
-        let next = (self.selected as i32 + delta).clamp(0, self.items.len() as i32 - 1) as usize;
+        let next = (self.selected as i32 + delta).clamp(0, self.flat.len() as i32 - 1) as usize;
         self.select_abs(next);
     }
 
     fn select_abs(&mut self, idx: usize) {
-        if self.items.is_empty() {
+        if self.flat.is_empty() {
             self.selected = 0;
             self.table_state.select(None);
             self.detail = None;
             return;
         }
-        self.selected = idx.min(self.items.len() - 1);
+        self.selected = idx.min(self.flat.len() - 1);
         self.table_state.select(Some(self.selected));
         self.detail_scroll = 0;
         self.load_detail();
     }
 
     fn next_unread(&mut self, dir: i32) {
-        if self.items.is_empty() {
+        if self.flat.is_empty() {
             return;
         }
-        let n = self.items.len();
+        let n = self.flat.len();
         let start = self.selected;
         let mut i = start;
         for _ in 0..n {
@@ -399,16 +407,32 @@ impl App {
             } else {
                 (i + n - 1) % n
             };
-            if self.items[i].unread {
-                self.select_abs(i);
-                return;
+            if let FlatRow::Item(idx) = self.flat[i] {
+                if self.items.get(idx).is_some_and(|it| it.unread) {
+                    self.select_abs(i);
+                    return;
+                }
             }
         }
         self.set_status(StatusKind::Info, "no unread in this view");
     }
 
+    fn current_item(&self) -> Option<&ItemRow> {
+        match self.flat.get(self.selected)? {
+            FlatRow::Item(i) => self.items.get(*i),
+            FlatRow::Child { parent, .. } => self.items.get(*parent),
+        }
+    }
+
+    fn selected_link(&self) -> Option<&crate::model::IssueLink> {
+        match self.flat.get(self.selected)? {
+            FlatRow::Child { parent, link } => self.items.get(*parent)?.links.get(*link),
+            FlatRow::Item(_) => None,
+        }
+    }
+
     fn toggle_read(&mut self) {
-        let Some(item) = self.items.get(self.selected).cloned() else {
+        let Some(item) = self.current_item().cloned() else {
             return;
         };
         let next = !item.unread;
@@ -424,11 +448,16 @@ impl App {
     }
 
     fn open_browser(&mut self) {
-        let url = self
-            .items
-            .get(self.selected)
-            .and_then(|i| i.html_url.clone())
-            .or_else(|| self.detail.as_ref().and_then(|d| d.row.html_url.clone()));
+        let url = if let Some(link) = self.selected_link() {
+            Some(format!(
+                "https://github.com/{}/issues/{}",
+                link.repo, link.number
+            ))
+        } else {
+            self.current_item()
+                .and_then(|i| i.html_url.clone())
+                .or_else(|| self.detail.as_ref().and_then(|d| d.row.html_url.clone()))
+        };
         match url {
             Some(url) => match open::that(&url) {
                 Ok(()) => self.set_status(StatusKind::Ok, "opened in browser"),
@@ -439,13 +468,28 @@ impl App {
     }
 
     fn request_comments(&mut self) {
-        let Some(item) = self.items.get(self.selected) else {
-            return;
-        };
         if self.cfg.offline || !self.cfg.has_token() {
             self.set_status(StatusKind::Warn, "offline / no token");
             return;
         }
+        if let Some(link) = self.selected_link() {
+            let Some(item_id) = link.to_id else {
+                self.set_status(StatusKind::Warn, "linked issue is not in the local cache");
+                return;
+            };
+            let (owner, repo) = split_repo(&link.repo);
+            let _ = self.cmd_tx.send(SyncCmd::Comments {
+                owner,
+                repo,
+                number: link.number,
+                item_id,
+            });
+            self.set_status(StatusKind::Info, "loading comments");
+            return;
+        }
+        let Some(item) = self.current_item() else {
+            return;
+        };
         let _ = self.cmd_tx.send(SyncCmd::Comments {
             owner: item.owner.clone(),
             repo: item.repo.clone(),
@@ -456,13 +500,24 @@ impl App {
     }
 
     fn refresh_selected(&mut self) {
-        let Some(item) = self.items.get(self.selected) else {
-            return;
-        };
         if self.cfg.offline || !self.cfg.has_token() {
             self.set_status(StatusKind::Warn, "offline / no token");
             return;
         }
+        if let Some(link) = self.selected_link() {
+            let (owner, repo) = split_repo(&link.repo);
+            let _ = self.cmd_tx.send(SyncCmd::Refresh {
+                owner,
+                repo,
+                number: link.number,
+                item_id: link.to_id.unwrap_or(0),
+            });
+            self.set_status(StatusKind::Info, "refreshing linked issue");
+            return;
+        }
+        let Some(item) = self.current_item() else {
+            return;
+        };
         let _ = self.cmd_tx.send(SyncCmd::Refresh {
             owner: item.owner.clone(),
             repo: item.repo.clone(),
@@ -503,8 +558,23 @@ impl App {
         self.reload();
     }
 
+    fn rebuild_flat(&mut self) {
+        self.flat.clear();
+        for (i, item) in self.items.iter().enumerate() {
+            self.flat.push(FlatRow::Item(i));
+            if item.kind != Kind::Pr {
+                continue;
+            }
+            for (j, link) in item.links.iter().enumerate() {
+                if item.shows_nested(link) {
+                    self.flat.push(FlatRow::Child { parent: i, link: j });
+                }
+            }
+        }
+    }
+
     fn reload(&mut self) {
-        let keep = self.items.get(self.selected).map(|i| i.id);
+        let keep = self.current_item().map(|i| i.id);
         self.reload_keep(keep.unwrap_or(-1));
     }
 
@@ -516,20 +586,34 @@ impl App {
                 return;
             }
         }
+        self.rebuild_flat();
         match self.db.counts_by_view(&self.query) {
             Ok(c) => self.counts = c,
             Err(e) => self.set_status(StatusKind::Warn, format!("counts: {e}")),
         }
-        let idx = self.items.iter().position(|i| i.id == keep_id).unwrap_or(0);
+        let idx = self
+            .flat
+            .iter()
+            .position(|row| matches!(row, FlatRow::Item(i) if self.items.get(*i).is_some_and(|it| it.id == keep_id)))
+            .unwrap_or(0);
         self.select_abs(idx);
     }
 
     fn load_detail(&mut self) {
-        let Some(item) = self.items.get(self.selected) else {
+        let id = match self.flat.get(self.selected) {
+            Some(FlatRow::Item(i)) => self.items.get(*i).map(|it| it.id),
+            Some(FlatRow::Child { parent, link }) => self
+                .items
+                .get(*parent)
+                .and_then(|p| p.links.get(*link))
+                .and_then(|l| l.to_id),
+            None => None,
+        };
+        let Some(id) = id else {
             self.detail = None;
             return;
         };
-        match self.db.get_detail(item.id) {
+        match self.db.get_detail(id) {
             Ok(d) => self.detail = d,
             Err(e) => {
                 self.detail = None;
@@ -544,6 +628,13 @@ impl App {
             kind,
             set_at: Instant::now(),
         };
+    }
+}
+
+fn split_repo(repo: &str) -> (String, String) {
+    match repo.split_once('/') {
+        Some((o, n)) => (o.to_string(), n.to_string()),
+        None => (repo.to_string(), String::new()),
     }
 }
 

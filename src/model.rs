@@ -210,6 +210,7 @@ pub struct IssueLink {
     pub kind: LinkKind,
     pub title: Option<String>,
     pub state: Option<ItemState>,
+    pub to_id: Option<i64>,
 }
 
 /// Fully hydrated GitHub item ready to persist.
@@ -297,6 +298,7 @@ pub struct ItemRow {
     pub roles: BTreeSet<Role>,
     pub approvals: u32,
     pub review_total: u32,
+    pub links: Vec<IssueLink>,
 }
 
 impl ItemRow {
@@ -314,6 +316,19 @@ impl ItemRow {
             return String::new();
         }
         format!("{}/{}", self.approvals, self.review_total)
+    }
+
+    pub fn shows_nested(&self, link: &IssueLink) -> bool {
+        let self_key = format!("{}/{}", self.owner, self.repo);
+        if link.number == self.number && link.repo.eq_ignore_ascii_case(&self_key) {
+            return false;
+        }
+        link.kind == LinkKind::Closes || link.title.is_some()
+    }
+
+    /// Issues this PR closes or clearly mentions — shown nested in lists.
+    pub fn nested_links(&self) -> impl Iterator<Item = &IssueLink> {
+        self.links.iter().filter(|link| self.shows_nested(link))
     }
 }
 

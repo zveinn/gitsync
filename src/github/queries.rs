@@ -16,9 +16,65 @@ fragment IssueFields on Issue {
   updatedAt
   closedAt
   author { ...ActorLogin }
-  comments { totalCount }
+  comments(first: 20) {
+    totalCount
+    nodes { body }
+  }
   assignees(first: 10) { nodes { login } }
   labels(first: 20) { nodes { name color } }
+  closedByPullRequestsReferences(first: 15) {
+    nodes {
+      number
+      title
+      state
+      url
+      repository { nameWithOwner }
+    }
+  }
+  timelineItems(first: 30, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
+    nodes {
+      __typename
+      ... on CrossReferencedEvent {
+        willCloseTarget
+        source {
+          __typename
+          ... on Issue {
+            number
+            title
+            state
+            url
+            repository { nameWithOwner }
+          }
+          ... on PullRequest {
+            number
+            title
+            state
+            url
+            repository { nameWithOwner }
+          }
+        }
+      }
+      ... on ConnectedEvent {
+        subject {
+          __typename
+          ... on Issue {
+            number
+            title
+            state
+            url
+            repository { nameWithOwner }
+          }
+          ... on PullRequest {
+            number
+            title
+            state
+            url
+            repository { nameWithOwner }
+          }
+        }
+      }
+    }
+  }
   repository { owner { login } name }
 }
 
@@ -41,7 +97,10 @@ fragment PrFields on PullRequest {
   additions
   deletions
   changedFiles
-  comments { totalCount }
+  comments(first: 20) {
+    totalCount
+    nodes { body }
+  }
   assignees(first: 10) { nodes { login } }
   labels(first: 20) { nodes { name color } }
   reviewRequests(first: 40) {
@@ -68,6 +127,50 @@ fragment PrFields on PullRequest {
       state
       url
       repository { nameWithOwner }
+    }
+  }
+  timelineItems(first: 30, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
+    nodes {
+      __typename
+      ... on CrossReferencedEvent {
+        willCloseTarget
+        source {
+          __typename
+          ... on Issue {
+            number
+            title
+            state
+            url
+            repository { nameWithOwner }
+          }
+          ... on PullRequest {
+            number
+            title
+            state
+            url
+            repository { nameWithOwner }
+          }
+        }
+      }
+      ... on ConnectedEvent {
+        subject {
+          __typename
+          ... on Issue {
+            number
+            title
+            state
+            url
+            repository { nameWithOwner }
+          }
+          ... on PullRequest {
+            number
+            title
+            state
+            url
+            repository { nameWithOwner }
+          }
+        }
+      }
     }
   }
   repository { owner { login } name }

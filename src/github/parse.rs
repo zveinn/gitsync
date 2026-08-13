@@ -46,49 +46,7 @@ pub fn item_from_value(v: &Value) -> Option<HydratedItem> {
     let labels = nodes_labels(v.pointer("/labels/nodes"));
     let review_requests = review_request_logins(v.pointer("/reviewRequests/nodes"));
     let reviews = latest_reviews(v.pointer("/latestReviews/nodes"));
-
-    let mut links = Vec::new();
-    if let Some(nodes) = v
-        .pointer("/closingIssuesReferences/nodes")
-        .and_then(Value::as_array)
-    {
-        for n in nodes {
-            let number = match n.get("number").and_then(Value::as_i64) {
-                Some(n) => n,
-                None => continue,
-            };
-            let repo = n
-                .pointer("/repository/nameWithOwner")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            if repo.is_empty() {
-                continue;
-            }
-            links.push(IssueLink {
-                repo,
-                number,
-                kind: LinkKind::Closes,
-                title: n.get("title").and_then(Value::as_str).map(str::to_string),
-                state: n.get("state").and_then(Value::as_str).map(ItemState::parse),
-            });
-        }
-    }
-    for extra in extract_refs(&body, &owner, &repo) {
-        if !links
-            .iter()
-            .any(|l| l.repo.eq_ignore_ascii_case(&extra.repo) && l.number == extra.number)
-        {
-            links.push(extra);
-        } else if extra.kind == LinkKind::Closes {
-            if let Some(existing) = links
-                .iter_mut()
-                .find(|l| l.repo.eq_ignore_ascii_case(&extra.repo) && l.number == extra.number)
-            {
-                existing.kind = LinkKind::Closes;
-            }
-        }
-    }
+    let links = collect_links(v, &owner, &repo, &body);
 
     Some(HydratedItem {
         node_id: v.get("id").and_then(Value::as_str).map(str::to_string),
@@ -192,6 +150,120 @@ pub fn comments_from_value(v: &Value) -> Vec<Comment> {
     }
     out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
     out
+}
+
+fn collect_links(v: &Value, owner: &str, repo: &str, body: &str) -> Vec<IssueLink> {
+    let mut links = Vec::new();
+    push_ref_nodes(
+        &mut links,
+        v.pointer("/closingIssuesReferences/nodes"),
+        LinkKind::Closes,
+    );
+    push_ref_nodes(
+        &mut links,
+        v.pointer("/closedByPullRequestsReferences/nodes"),
+        LinkKind::Closes,
+    );
+
+    if let Some(nodes) = v.pointer("/timelineItems/nodes").and_then(Value::as_array) {
+        for n in nodes {
+            match n.get("__typename").and_then(Value::as_str) {
+                Some("CrossReferencedEvent") => {
+                    let kind = if n.get("willCloseTarget").and_then(Value::as_bool) == Some(true) {
+                        LinkKind::Closes
+                    } else {
+                        LinkKind::Mentioned
+                    };
+                    if let Some(src) = n.get("source") {
+                        push_node(&mut links, src, kind);
+                    }
+                }
+                Some("ConnectedEvent") => {
+                    if let Some(sub) = n.get("subject") {
+                        push_node(&mut links, sub, LinkKind::Mentioned);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut texts = vec![body.to_string()];
+    for path in ["/comments/nodes", "/latestReviews/nodes"] {
+        if let Some(nodes) = v.pointer(path).and_then(Value::as_array) {
+            for n in nodes {
+                if let Some(b) = n.get("body").and_then(Value::as_str) {
+                    texts.push(b.to_string());
+                }
+            }
+        }
+    }
+    for text in texts {
+        for extra in extract_refs(&text, owner, repo) {
+            merge_link(&mut links, extra);
+        }
+    }
+    links
+}
+
+fn push_ref_nodes(links: &mut Vec<IssueLink>, nodes: Option<&Value>, kind: LinkKind) {
+    let Some(arr) = nodes.and_then(Value::as_array) else {
+        return;
+    };
+    for n in arr {
+        push_node(links, n, kind);
+    }
+}
+
+fn push_node(links: &mut Vec<IssueLink>, n: &Value, kind: LinkKind) {
+    if n.is_null() {
+        return;
+    }
+    let typename = n.get("__typename").and_then(Value::as_str).unwrap_or("");
+    if !typename.is_empty() && typename != "Issue" && typename != "PullRequest" {
+        return;
+    }
+    let Some(number) = n.get("number").and_then(Value::as_i64) else {
+        return;
+    };
+    let repo = n
+        .pointer("/repository/nameWithOwner")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if repo.is_empty() {
+        return;
+    }
+    merge_link(
+        links,
+        IssueLink {
+            repo,
+            number,
+            kind,
+            title: n.get("title").and_then(Value::as_str).map(str::to_string),
+            state: n.get("state").and_then(Value::as_str).map(ItemState::parse),
+            to_id: None,
+        },
+    );
+}
+
+fn merge_link(links: &mut Vec<IssueLink>, new: IssueLink) {
+    if let Some(existing) = links
+        .iter_mut()
+        .find(|l| l.repo.eq_ignore_ascii_case(&new.repo) && l.number == new.number)
+    {
+        if new.kind == LinkKind::Closes {
+            existing.kind = LinkKind::Closes;
+        }
+        if existing.title.is_none() {
+            existing.title = new.title;
+        }
+        if existing.state.is_none() {
+            existing.state = new.state;
+        }
+        return;
+    }
+    links.push(new);
 }
 
 fn nodes_logins(nodes: Option<&Value>) -> Vec<String> {
@@ -330,6 +402,47 @@ mod tests {
         let roles = item.field_roles("me");
         assert!(roles.contains(&crate::model::Role::ReviewRequested));
         assert!(!roles.contains(&crate::model::Role::Authored));
+    }
+
+    #[test]
+    fn links_from_timeline_and_comment_url() {
+        let v = json!({
+            "__typename": "PullRequest",
+            "id": "PR_9",
+            "number": 6752,
+            "title": "metrics",
+            "body": "no issue number in the description",
+            "state": "OPEN",
+            "url": "https://github.com/miniohq/aistor/pull/6752",
+            "comments": {
+                "totalCount": 1,
+                "nodes": [{ "body": "https://github.com/miniohq/aistor/issues/6671" }]
+            },
+            "closingIssuesReferences": { "nodes": [{
+                "number": 6671,
+                "title": "memory analytics",
+                "state": "OPEN",
+                "repository": { "nameWithOwner": "miniohq/aistor" }
+            }]},
+            "timelineItems": { "nodes": [
+                {
+                    "__typename": "ConnectedEvent",
+                    "subject": {
+                        "__typename": "Issue",
+                        "number": 6671,
+                        "title": "memory analytics",
+                        "state": "OPEN",
+                        "repository": { "nameWithOwner": "miniohq/aistor" }
+                    }
+                }
+            ]},
+            "repository": { "owner": { "login": "miniohq" }, "name": "aistor" }
+        });
+        let item = item_from_value(&v).unwrap();
+        let hits: Vec<_> = item.links.iter().filter(|l| l.number == 6671).collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, LinkKind::Closes);
+        assert_eq!(hits[0].title.as_deref(), Some("memory analytics"));
     }
 
     #[test]

@@ -63,6 +63,7 @@ pub fn extract_refs(body: &str, owner: &str, repo: &str) -> Vec<IssueLink> {
             kind,
             title: None,
             state: None,
+            to_id: None,
         });
     };
 

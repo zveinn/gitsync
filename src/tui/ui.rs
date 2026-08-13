@@ -6,10 +6,10 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Table, Wrap,
 };
 
-use crate::model::{ItemRow, ItemState, Role, View};
+use crate::model::{IssueLink, ItemRow, ItemState, LinkKind, Role, View};
 use crate::timeutil::{relative, relative_short, truncate_width, wrap_text};
 
-use super::{App, Focus, Mode, StatusKind};
+use super::{App, FlatRow, Focus, Mode, StatusKind};
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -162,7 +162,7 @@ fn pane(focused: bool) -> Block<'static> {
 
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::List && app.mode == Mode::Normal;
-    let pos = if app.items.is_empty() {
+    let pos = if app.flat.is_empty() {
         0
     } else {
         app.selected + 1
@@ -170,7 +170,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let title = if app.mode == Mode::Filter {
         format!("  /{}▌ ", app.filter_buf)
     } else {
-        format!(" {}  {}/{} ", app.query.view.name(), pos, app.items.len())
+        format!(" {}  {}/{} ", app.query.view.name(), pos, app.flat.len())
     };
     let block = pane(focused).title(Span::styled(title, Style::new().fg(Theme::MUTED)));
 
@@ -238,9 +238,16 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let header = Row::new(header_cells).height(1);
 
     let rows: Vec<Row> = app
-        .items
+        .flat
         .iter()
-        .map(|item| item_row(item, show_review, compact))
+        .filter_map(|row| match row {
+            FlatRow::Item(i) => Some(item_row(&app.items[*i], show_review, compact)),
+            FlatRow::Child { parent, link } => {
+                let parent = app.items.get(*parent)?;
+                let link = parent.links.get(*link)?;
+                Some(child_row(link, show_review, compact))
+            }
+        })
         .collect();
 
     let table = Table::new(rows, widths)
@@ -301,6 +308,41 @@ fn item_row(item: &ItemRow, show_review: bool, compact: bool) -> Row<'static> {
         cells.push(Cell::from(text).style(Style::new().fg(color)));
     }
     Row::new(cells).height(1)
+}
+
+fn child_row(link: &IssueLink, show_review: bool, compact: bool) -> Row<'static> {
+    let tag = match link.kind {
+        LinkKind::Closes => "closes",
+        LinkKind::Mentioned => "linked",
+    };
+    let title = link.title.clone().unwrap_or_default();
+    if compact {
+        return Row::new(vec![
+            Cell::from("↳").style(Style::new().fg(Theme::FAINT)),
+            Cell::from(format!("{}#{}", short_repo(&link.repo), link.number))
+                .style(Style::new().fg(Theme::BLUE)),
+            Cell::from(title).style(Style::new().fg(Theme::MUTED)),
+        ])
+        .height(1);
+    }
+    let state_text = link.state.map(state_label).unwrap_or("");
+    let state_fg = link.state.map(state_color).unwrap_or(Theme::DIM);
+    let mut cells = vec![
+        Cell::from("↳").style(Style::new().fg(Theme::FAINT)),
+        Cell::from(tag).style(Style::new().fg(Theme::DIM).italic()),
+        Cell::from(state_text).style(Style::new().fg(state_fg)),
+        Cell::from(format!("{}#{}", link.repo, link.number)).style(Style::new().fg(Theme::BLUE)),
+        Cell::from(title).style(Style::new().fg(Theme::MUTED)),
+        Cell::from("").style(Style::new().fg(Theme::DIM)),
+    ];
+    if show_review {
+        cells.push(Cell::from(""));
+    }
+    Row::new(cells).height(1)
+}
+
+fn short_repo(repo: &str) -> &str {
+    repo.rsplit_once('/').map(|(_, n)| n).unwrap_or(repo)
 }
 
 fn format_repo(owner: &str, repo: &str, number: i64) -> String {
