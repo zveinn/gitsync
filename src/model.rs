@@ -378,35 +378,29 @@ pub struct ItemDetail {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
-    Inbox,
-    Reviews,
-    Mine,
-    Pulls,
-    Issues,
-    All,
-    Closed,
+    AllPrs,
+    MyPrs,
+    ClosedPrs,
+    AllIssues,
+    ClosedIssues,
 }
 
 impl View {
-    pub const ALL: [View; 7] = [
-        View::Inbox,
-        View::Reviews,
-        View::Mine,
-        View::Pulls,
-        View::Issues,
-        View::All,
-        View::Closed,
+    pub const ALL: [View; 5] = [
+        View::AllPrs,
+        View::MyPrs,
+        View::ClosedPrs,
+        View::AllIssues,
+        View::ClosedIssues,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Inbox => "Inbox",
-            Self::Reviews => "Reviews",
-            Self::Mine => "Mine",
-            Self::Pulls => "Pulls",
-            Self::Issues => "Issues",
-            Self::All => "All",
-            Self::Closed => "Closed",
+            Self::AllPrs => "All PRs",
+            Self::MyPrs => "My PRs",
+            Self::ClosedPrs => "Closed PRs",
+            Self::AllIssues => "All Issues",
+            Self::ClosedIssues => "Closed Issues",
         }
     }
 
@@ -418,11 +412,11 @@ impl View {
     }
 
     pub fn uses_time_filter(self) -> bool {
-        matches!(self, Self::Pulls | Self::Issues | Self::All | Self::Closed)
+        matches!(self, Self::ClosedPrs | Self::ClosedIssues)
     }
 
     pub fn uses_state_filter(self) -> bool {
-        matches!(self, Self::Pulls | Self::Issues | Self::All)
+        false
     }
 }
 
@@ -546,7 +540,7 @@ pub struct ItemQuery {
 
 impl Default for View {
     fn default() -> Self {
-        Self::Inbox
+        Self::AllPrs
     }
 }
 
@@ -613,10 +607,10 @@ mod tests {
 
     #[test]
     fn view_shift_wraps() {
-        assert_eq!(View::Inbox.shift(1), View::Reviews);
-        assert_eq!(View::Inbox.shift(-1), View::Closed);
-        assert_eq!(View::Closed.shift(1), View::Inbox);
-        assert_eq!(View::Mine.shift(2), View::Issues);
+        assert_eq!(View::AllPrs.shift(1), View::MyPrs);
+        assert_eq!(View::AllPrs.shift(-1), View::ClosedIssues);
+        assert_eq!(View::ClosedIssues.shift(1), View::AllPrs);
+        assert_eq!(View::MyPrs.shift(2), View::AllIssues);
     }
 
     #[test]

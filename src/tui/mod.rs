@@ -11,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::model::{ItemDetail, ItemQuery, ItemRow, Kind, StateFilter, TimeRange, View};
+use crate::model::{ItemDetail, ItemQuery, ItemRow, StateFilter, TimeRange, View};
 use crate::sync::{SyncCmd, SyncEvent, SyncKind};
 
 pub fn run(
@@ -105,7 +105,7 @@ impl App {
             allowed_repos: cfg.allowed_repos.clone(),
             time: TimeRange::Days(30),
             state: StateFilter::Open,
-            view: View::Inbox,
+            view: View::AllPrs,
             search: String::new(),
         };
         Self {
@@ -562,9 +562,6 @@ impl App {
         self.flat.clear();
         for (i, item) in self.items.iter().enumerate() {
             self.flat.push(FlatRow::Item(i));
-            if item.kind != Kind::Pr {
-                continue;
-            }
             for (j, link) in item.links.iter().enumerate() {
                 if item.shows_nested(link) {
                     self.flat.push(FlatRow::Child { parent: i, link: j });

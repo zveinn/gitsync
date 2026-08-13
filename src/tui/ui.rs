@@ -86,7 +86,11 @@ fn draw_title(frame: &mut Frame, app: &App, area: Rect) {
     ]);
     let right = Line::from(vec![
         Span::styled(
-            format!("{} · {}", app.query.time.label(), app.query.state.label()),
+            if app.query.view.uses_time_filter() {
+                app.query.time.label()
+            } else {
+                String::new()
+            },
             Style::new().fg(Theme::MUTED),
         ),
         Span::raw("  "),
@@ -118,7 +122,7 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
                 .fg(Color::Black)
                 .bg(Theme::ACCENT)
                 .add_modifier(Modifier::BOLD)
-        } else if view == View::Inbox && count > 0 {
+        } else if view == View::AllPrs && count > 0 {
             Style::new().fg(Theme::AMBER)
         } else {
             Style::new().fg(Theme::MUTED)
@@ -674,13 +678,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
 gitsync
 
 Views   (h / l  or  ← →)
-  Inbox         unread, review requested, assigned
-  Reviews       open PRs you review or were asked to
-  Mine          open items you authored
-  Pulls         pull requests   (t / s filter)
-  Issues        issues
-  All           everything in the time window
-  Closed        closed + merged
+  All PRs       open PRs you authored or were asked to review
+  My PRs        open PRs you authored
+  Closed PRs    closed / merged PRs  (t time)
+  All Issues    open issues, with linked PRs nested
+  Closed Issues closed issues, with linked PRs nested
 
 Movement
   h/l           previous / next view
@@ -692,8 +694,7 @@ Movement
   n / N         next / previous unread
   J / K         scroll preview
   /             filter title, repo, author, number
-  t             cycle time window
-  s             cycle open / all / closed
+  t             cycle time window (closed views)
 
 Actions
   o  enter      open in browser

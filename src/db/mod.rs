@@ -777,33 +777,30 @@ fn attach_links(c: &Connection, items: &mut [ItemRow]) -> Result<()> {
 
 fn apply_view_filter(sql: &mut String, view: View) {
     match view {
-        View::Inbox => {
-            sql.push_str(
-                " AND (i.unread = 1 OR (i.state = 'open' AND i.id IN (
-                    SELECT item_id FROM item_roles
-                    WHERE role IN ('review_requested', 'assigned')
-                  )))",
-            );
-        }
-        View::Reviews => {
+        View::AllPrs => {
             sql.push_str(
                 " AND i.kind = 'pr' AND i.state = 'open' AND i.id IN (
                     SELECT item_id FROM item_roles
-                    WHERE role IN ('review_requested', 'reviewed')
+                    WHERE role IN ('authored', 'review_requested', 'reviewed', 'assigned')
                   )",
             );
         }
-        View::Mine => {
+        View::MyPrs => {
             sql.push_str(
-                " AND i.state = 'open' AND i.id IN (
+                " AND i.kind = 'pr' AND i.state = 'open' AND i.id IN (
                     SELECT item_id FROM item_roles WHERE role = 'authored'
                   )",
             );
         }
-        View::Pulls => sql.push_str(" AND i.kind = 'pr'"),
-        View::Issues => sql.push_str(" AND i.kind = 'issue'"),
-        View::All => {}
-        View::Closed => sql.push_str(" AND i.state IN ('closed', 'merged')"),
+        View::ClosedPrs => {
+            sql.push_str(" AND i.kind = 'pr' AND i.state IN ('closed', 'merged')");
+        }
+        View::AllIssues => {
+            sql.push_str(" AND i.kind = 'issue' AND i.state = 'open'");
+        }
+        View::ClosedIssues => {
+            sql.push_str(" AND i.kind = 'issue' AND i.state = 'closed'");
+        }
     }
 }
 
@@ -920,7 +917,7 @@ mod tests {
         db.upsert_item(&item, &roles, true, true).unwrap();
 
         let mut q = ItemQuery::default();
-        q.view = View::Inbox;
+        q.view = View::AllPrs;
         let rows = db.list(&q).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].primary_role(), Role::Authored);
@@ -954,11 +951,12 @@ mod tests {
         }];
         item.review_requests = vec!["bob".into(), "carol".into()];
         item.review_decision = Some("REVIEW_REQUIRED".into());
-        db.upsert_item(&item, &BTreeSet::new(), false, true)
-            .unwrap();
+        let mut roles = BTreeSet::new();
+        roles.insert(Role::Authored);
+        db.upsert_item(&item, &roles, false, true).unwrap();
 
         let mut q = ItemQuery::default();
-        q.view = View::Pulls;
+        q.view = View::AllPrs;
         q.state = StateFilter::Open;
         q.time = crate::model::TimeRange::All;
         let rows = db.list(&q).unwrap();
@@ -966,5 +964,30 @@ mod tests {
         assert_eq!(rows[0].approvals, 1);
         assert_eq!(rows[0].review_total, 3);
         assert_eq!(rows[0].review_summary(), "1/3");
+    }
+
+    #[test]
+    fn issue_nests_linked_pr() {
+        let db = Db::open(":memory:").unwrap();
+        let issue = sample("acme", "box", 1, Kind::Issue, ItemState::Open);
+        db.upsert_item(&issue, &BTreeSet::new(), false, true)
+            .unwrap();
+        let pr = sample("acme", "box", 12, Kind::Pr, ItemState::Open);
+        let mut roles = BTreeSet::new();
+        roles.insert(Role::Authored);
+        db.upsert_item(&pr, &roles, false, true).unwrap();
+
+        let mut q = ItemQuery::default();
+        q.view = View::AllIssues;
+        q.time = crate::model::TimeRange::All;
+        let rows = db.list(&q).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, Kind::Issue);
+        assert!(
+            rows[0]
+                .nested_links()
+                .any(|l| l.number == 12 && l.kind == LinkKind::Closes),
+            "issue should nest the PR that closes it"
+        );
     }
 }

@@ -88,11 +88,11 @@ from rotting in the cache — the bug the old `--time` window had to special-cas
 
 ```
  gitsync   zveinn                              30d · open   synced 12s
- Inbox 15   Reviews 13   Mine 11   Pulls 18   Issues 1   All 19   Closed 43
-╭ Inbox  1/15 ─────────────────────────────────────────────────────────────╮
+ All PRs 12   My PRs 7   Closed PRs 40   All Issues 3   Closed Issues 18
+╭ All PRs  1/12 ───────────────────────────────────────────────────────────╮
 │   role        state    repository              title              age    │
 │ ● Requested   Open     miniohq/aistor#6752     feat: add mem…      3m    │
-│   Authored    Open     miniohq/act#20          Fix colors…        11m    │
+│   ↳ closes    Open     miniohq/aistor#6671     memory analytics          │
 ╰──────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -105,7 +105,7 @@ from rotting in the cache — the bug the old `--time` window had to special-cas
 | `esc` | Close the preview |
 | `/` | Filter title, repo, author, number |
 | `t` | Cycle time window (`1d` → `3d` → `7d` → `30d` → `90d` → `1y` → all) |
-| `s` | Cycle open / all / closed (Pulls, Issues, All) |
+| `s` | (unused — each view already picks open or closed) |
 | `m` | Toggle local read/unread |
 | `n` `N` | Next / previous unread |
 | `o` / `enter` | Open in browser |
@@ -116,7 +116,7 @@ from rotting in the cache — the bug the old `--time` window had to special-cas
 | `?` | Help |
 | `q` | Quit |
 
-Inbox is "needs you": unread, or open and (`review requested` or `assigned`).
+**All PRs** is open PRs you authored or were asked to review. **All Issues** nests PRs that close or mention each issue, the same way PRs nest their linked issues.
 
 ## Config
 
