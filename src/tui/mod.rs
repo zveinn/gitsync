@@ -14,6 +14,15 @@ use crate::db::Db;
 use crate::model::{ItemDetail, ItemQuery, ItemRow, StateFilter, TimeRange, View};
 use crate::sync::{SyncCmd, SyncEvent, SyncKind};
 
+const SYNC_OPTIONS: [&str; 6] = [
+    "this item",
+    "last 7 days",
+    "last 30 days",
+    "last 60 days",
+    "last 90 days",
+    "all",
+];
+
 pub fn run(
     db: Db,
     cfg: Config,
@@ -36,7 +45,7 @@ enum Mode {
     Normal,
     Filter,
     Help,
-    ConfirmBackfill,
+    SyncMenu,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +91,7 @@ pub(crate) struct App {
     focus: Focus,
     mode: Mode,
     filter_buf: String,
+    sync_choice: usize,
     status: Status,
     syncing: bool,
     sync_label: String,
@@ -125,6 +135,7 @@ impl App {
             focus: Focus::List,
             mode: Mode::Normal,
             filter_buf: String::new(),
+            sync_choice: 0,
             status: Status {
                 message: "local cache · syncing in background".into(),
                 kind: StatusKind::Info,
@@ -229,17 +240,21 @@ impl App {
                     self.mode = Mode::Normal;
                 }
             }
-            Mode::ConfirmBackfill => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.mode = Mode::Normal;
-                    if self.cfg.has_token() && !self.cfg.offline {
-                        let _ = self.cmd_tx.send(SyncCmd::Backfill);
-                        self.set_status(StatusKind::Info, "full backfill started");
-                    } else {
-                        self.set_status(StatusKind::Warn, "offline / no token");
-                    }
+            Mode::SyncMenu => match key.code {
+                KeyCode::Esc => self.mode = Mode::Normal,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.sync_choice = (self.sync_choice + 1) % SYNC_OPTIONS.len();
                 }
-                _ => self.mode = Mode::Normal,
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.sync_choice =
+                        (self.sync_choice + SYNC_OPTIONS.len() - 1) % SYNC_OPTIONS.len();
+                }
+                KeyCode::Char(c @ '1'..='6') => {
+                    self.sync_choice = (c as u8 - b'1') as usize;
+                    self.run_sync_choice();
+                }
+                KeyCode::Enter => self.run_sync_choice(),
+                _ => {}
             },
             Mode::Filter => match key.code {
                 KeyCode::Esc => {
@@ -326,14 +341,6 @@ impl App {
             }
             KeyCode::Char('J') => self.detail_scroll = self.detail_scroll.saturating_add(1),
             KeyCode::Char('K') => self.detail_scroll = self.detail_scroll.saturating_sub(1),
-            KeyCode::Char('t') => {
-                self.query.time = self.query.time.cycle();
-                self.reload();
-                self.set_status(
-                    StatusKind::Info,
-                    format!("time {}", self.query.time.label()),
-                );
-            }
             KeyCode::Char('s') => {
                 if self.query.view.uses_state_filter() {
                     self.query.state = self.query.state.cycle();
@@ -350,17 +357,9 @@ impl App {
             KeyCode::Char('o') | KeyCode::Enter => self.open_browser(),
             KeyCode::Char('y') => self.copy_url(),
             KeyCode::Char('c') => self.request_comments(),
-            KeyCode::Char('r') => self.refresh_selected(),
-            KeyCode::Char('R') => {
-                if self.cfg.has_token() && !self.cfg.offline {
-                    let _ = self.cmd_tx.send(SyncCmd::Poll);
-                    self.set_status(StatusKind::Info, "poll requested");
-                } else {
-                    self.set_status(StatusKind::Warn, "offline / no token");
-                }
-            }
-            KeyCode::Char('F') => {
-                self.mode = Mode::ConfirmBackfill;
+            KeyCode::Char('r') => {
+                self.sync_choice = 0;
+                self.mode = Mode::SyncMenu;
             }
             _ => {}
         }
@@ -526,6 +525,34 @@ impl App {
         self.set_status(StatusKind::Info, "loading comments");
     }
 
+    fn run_sync_choice(&mut self) {
+        self.mode = Mode::Normal;
+        match self.sync_choice {
+            0 => self.refresh_selected(),
+            1 => self.start_created_sync(Some(7)),
+            2 => self.start_created_sync(Some(30)),
+            3 => self.start_created_sync(Some(60)),
+            4 => self.start_created_sync(Some(90)),
+            5 => self.start_created_sync(None),
+            _ => {}
+        }
+    }
+
+    fn start_created_sync(&mut self, created_days: Option<u32>) {
+        if self.cfg.offline || !self.cfg.has_token() {
+            self.set_status(StatusKind::Warn, "offline / no token");
+            return;
+        }
+        let _ = self.cmd_tx.send(SyncCmd::Search { created_days });
+        self.set_status(
+            StatusKind::Info,
+            match created_days {
+                Some(d) => format!("syncing items created in the last {d}d"),
+                None => "syncing all involvement".into(),
+            },
+        );
+    }
+
     fn refresh_selected(&mut self) {
         if self.cfg.offline || !self.cfg.has_token() {
             self.set_status(StatusKind::Warn, "offline / no token");
@@ -665,7 +692,7 @@ fn split_repo(repo: &str) -> (String, String) {
 fn kind_label(k: SyncKind) -> &'static str {
     match k {
         SyncKind::Poll => "sync",
-        SyncKind::Backfill => "backfill",
+        SyncKind::Search => "sync",
         SyncKind::RefreshItem => "refresh",
         SyncKind::Comments => "comments",
     }

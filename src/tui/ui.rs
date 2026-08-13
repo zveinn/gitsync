@@ -46,7 +46,7 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
 
     match app.mode {
         Mode::Help => draw_help(frame, area),
-        Mode::ConfirmBackfill => draw_confirm(frame, area),
+        Mode::SyncMenu => draw_sync_menu(frame, app, area),
         Mode::Filter | Mode::Normal => {}
     }
 }
@@ -180,7 +180,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if app.items.is_empty() {
         let empty = if app.cfg.has_token() {
-            "Nothing here.  R poll   F backfill   6 all items"
+            "Nothing here.  r sync   h/l views"
         } else {
             "No local data. Set GITHUB_TOKEN and press R."
         };
@@ -656,7 +656,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             app.items.len()
         )
     };
-    let keys = "i preview   y copy   h/l views   j/k   / filter   o open   ?";
+    let keys = "r sync   i preview   y copy   h/l views   j/k   / filter   o open   ?";
     let line = Line::from(vec![
         Span::styled(format!(" {left} "), Style::new().fg(msg_fg).bg(msg_bg)),
         Span::raw(" "),
@@ -694,16 +694,13 @@ Movement
   n / N         next / previous unread
   J / K         scroll preview
   /             filter title, repo, author, number
-  t             cycle time window (closed views)
 
 Actions
   y             copy GitHub URL (works over SSH)
   o  enter      open in browser
   m             toggle local read/unread
   c             fetch comments
-  r             refresh this item
-  R             poll now
-  F             full backfill
+  r             sync menu (this item / last 7–90d / all)
   q             quit
 ";
     let popup = centered(area, 62, 32);
@@ -715,12 +712,44 @@ Actions
     );
 }
 
-fn draw_confirm(frame: &mut Frame, area: Rect) {
-    let popup = centered(area, 52, 7);
+fn draw_sync_menu(frame: &mut Frame, app: &App, area: Rect) {
+    let options = [
+        "1   this item",
+        "2   last 7 days",
+        "3   last 30 days",
+        "4   last 60 days",
+        "5   last 90 days",
+        "6   all",
+    ];
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            "created date on GitHub, not last update",
+            Style::new().fg(Theme::DIM),
+        )),
+        Line::from(""),
+    ];
+    for (i, opt) in options.iter().enumerate() {
+        let selected = i == app.sync_choice;
+        let style = if selected {
+            Style::new()
+                .fg(Color::Black)
+                .bg(Theme::ACCENT)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(Theme::TEXT)
+        };
+        lines.push(Line::styled(format!(" {opt} "), style));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "j/k  ·  1-6  ·  enter  ·  esc",
+        Style::new().fg(Theme::FAINT),
+    ));
+    let popup = centered(area, 42, 13);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new("Run a full search backfill?\n\ny confirm     any other key cancel")
-            .block(pane(true).title(Span::styled(" confirm ", Style::new().fg(Theme::AMBER)))),
+        Paragraph::new(lines)
+            .block(pane(true).title(Span::styled(" sync ", Style::new().fg(Theme::ACCENT)))),
         popup,
     );
 }

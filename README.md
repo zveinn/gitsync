@@ -104,16 +104,12 @@ from rotting in the cache — the bug the old `--time` window had to special-cas
 | `tab` | Toggle list / preview focus |
 | `esc` | Close the preview |
 | `/` | Filter title, repo, author, number |
-| `t` | Cycle time window (`1d` → `3d` → `7d` → `30d` → `90d` → `1y` → all) |
-| `s` | (unused — each view already picks open or closed) |
+| `r` | Sync menu: this item, created last 7/30/60/90 days, or all |
 | `m` | Toggle local read/unread |
 | `n` `N` | Next / previous unread |
 | `y` | Copy the GitHub URL (OSC 52, works over SSH) |
 | `o` / `enter` | Open in browser |
 | `c` | Fetch comments for the selected item |
-| `r` | Refresh this item |
-| `R` | Poll notifications now |
-| `F` | Confirm a full backfill |
 | `?` | Help |
 | `q` | Quit |
 

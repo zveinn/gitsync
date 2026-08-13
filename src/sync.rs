@@ -19,7 +19,7 @@ const SAFETY_SEARCH_HOURS: i64 = 36;
 #[derive(Debug, Clone)]
 pub enum SyncKind {
     Poll,
-    Backfill,
+    Search,
     RefreshItem,
     Comments,
 }
@@ -53,7 +53,10 @@ pub enum SyncEvent {
 #[derive(Debug, Clone)]
 pub enum SyncCmd {
     Poll,
-    Backfill,
+    /// Re-search involvement. `created_days: None` means no created-date bound.
+    Search {
+        created_days: Option<u32>,
+    },
     Refresh {
         owner: String,
         repo: String,
@@ -100,120 +103,110 @@ pub async fn run_worker(
         });
     }
 
-    let backfill_done = db.meta_get("backfill_done").ok().flatten().as_deref() == Some("1");
-    if !backfill_done {
-        emit(
-            &ev_tx,
-            SyncEvent::Started {
-                kind: SyncKind::Backfill,
-                message: "first-run backfill".into(),
-            },
-        );
-        match backfill(&db, &cfg, &client, &ev_tx).await {
-            Ok(r) => emit(
-                &ev_tx,
-                SyncEvent::Finished {
-                    kind: SyncKind::Backfill,
-                    fetched: r.fetched,
-                    upserted: r.upserted,
-                    unread: r.unread,
-                    message: r.message,
-                },
-            ),
-            Err(e) => emit(
-                &ev_tx,
-                SyncEvent::Failed {
-                    kind: SyncKind::Backfill,
-                    error: e.to_string(),
-                },
-            ),
-        }
-        emit_rate(&ev_tx, &client);
-    } else {
-        // Quiet first poll so the TUI has fresh data without waiting for the interval.
-        let _ = poll_once(&db, &cfg, &client, &ev_tx).await;
-    }
-
-    let mut interval = tokio::time::interval(Duration::from_secs(cfg.poll_seconds));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    interval.tick().await; // skip immediate tick; we already polled/backfilled
-
-    loop {
-        tokio::select! {
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    None | Some(SyncCmd::Shutdown) => break,
-                    Some(SyncCmd::Poll) => {
-                        let _ = poll_once(&db, &cfg, &client, &ev_tx).await;
-                    }
-                    Some(SyncCmd::Backfill) => {
-                        emit(&ev_tx, SyncEvent::Started {
-                            kind: SyncKind::Backfill,
-                            message: "full backfill".into(),
-                        });
-                        match backfill(&db, &cfg, &client, &ev_tx).await {
-                            Ok(r) => emit(&ev_tx, SyncEvent::Finished {
-                                kind: SyncKind::Backfill,
-                                fetched: r.fetched,
-                                upserted: r.upserted,
-                                unread: r.unread,
-                                message: r.message,
-                            }),
-                            Err(e) => emit(&ev_tx, SyncEvent::Failed {
-                                kind: SyncKind::Backfill,
-                                error: e.to_string(),
-                            }),
-                        }
-                        emit_rate(&ev_tx, &client);
-                    }
-                    Some(SyncCmd::Refresh { owner, repo, number, item_id }) => {
-                        emit(&ev_tx, SyncEvent::Started {
-                            kind: SyncKind::RefreshItem,
-                            message: format!("refresh {owner}/{repo}#{number}"),
-                        });
-                        match refresh_one(&db, &cfg, &client, &owner, &repo, number).await {
-                            Ok(_) => emit(&ev_tx, SyncEvent::Finished {
-                                kind: SyncKind::RefreshItem,
-                                fetched: 1,
-                                upserted: 1,
-                                unread: 0,
-                                message: format!("refreshed {owner}/{repo}#{number}"),
-                            }),
-                            Err(e) => emit(&ev_tx, SyncEvent::Failed {
-                                kind: SyncKind::RefreshItem,
-                                error: e.to_string(),
-                            }),
-                        }
-                        let _ = item_id;
-                    }
-                    Some(SyncCmd::Comments { owner, repo, number, item_id }) => {
-                        emit(&ev_tx, SyncEvent::Started {
-                            kind: SyncKind::Comments,
-                            message: format!("comments {owner}/{repo}#{number}"),
-                        });
-                        match load_comments(&db, &client, &owner, &repo, number, item_id).await {
-                            Ok(n) => emit(&ev_tx, SyncEvent::Finished {
-                                kind: SyncKind::Comments,
-                                fetched: 1,
-                                upserted: n,
-                                unread: 0,
-                                message: format!("{n} comments"),
-                            }),
-                            Err(e) => emit(&ev_tx, SyncEvent::Failed {
-                                kind: SyncKind::Comments,
-                                error: e.to_string(),
-                            }),
-                        }
-                    }
-                }
-            }
-            _ = interval.tick() => {
+    while let Some(cmd) = cmd_rx.recv().await {
+        match cmd {
+            SyncCmd::Shutdown => break,
+            SyncCmd::Poll => {
                 let _ = poll_once(&db, &cfg, &client, &ev_tx).await;
-                if let Some(secs) = client.rate_snapshot().poll_interval {
-                    if secs > cfg.poll_seconds {
-                        interval = tokio::time::interval(Duration::from_secs(secs));
-                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    }
+            }
+            SyncCmd::Search { created_days } => {
+                let label = match created_days {
+                    Some(d) => format!("sync created last {d}d"),
+                    None => "sync all".into(),
+                };
+                emit(
+                    &ev_tx,
+                    SyncEvent::Started {
+                        kind: SyncKind::Search,
+                        message: label,
+                    },
+                );
+                match search_created(&db, &cfg, &client, &ev_tx, created_days).await {
+                    Ok(r) => emit(
+                        &ev_tx,
+                        SyncEvent::Finished {
+                            kind: SyncKind::Search,
+                            fetched: r.fetched,
+                            upserted: r.upserted,
+                            unread: r.unread,
+                            message: r.message,
+                        },
+                    ),
+                    Err(e) => emit(
+                        &ev_tx,
+                        SyncEvent::Failed {
+                            kind: SyncKind::Search,
+                            error: e.to_string(),
+                        },
+                    ),
+                }
+                emit_rate(&ev_tx, &client);
+            }
+            SyncCmd::Refresh {
+                owner,
+                repo,
+                number,
+                item_id,
+            } => {
+                emit(
+                    &ev_tx,
+                    SyncEvent::Started {
+                        kind: SyncKind::RefreshItem,
+                        message: format!("refresh {owner}/{repo}#{number}"),
+                    },
+                );
+                match refresh_one(&db, &cfg, &client, &owner, &repo, number).await {
+                    Ok(_) => emit(
+                        &ev_tx,
+                        SyncEvent::Finished {
+                            kind: SyncKind::RefreshItem,
+                            fetched: 1,
+                            upserted: 1,
+                            unread: 0,
+                            message: format!("refreshed {owner}/{repo}#{number}"),
+                        },
+                    ),
+                    Err(e) => emit(
+                        &ev_tx,
+                        SyncEvent::Failed {
+                            kind: SyncKind::RefreshItem,
+                            error: e.to_string(),
+                        },
+                    ),
+                }
+                let _ = item_id;
+            }
+            SyncCmd::Comments {
+                owner,
+                repo,
+                number,
+                item_id,
+            } => {
+                emit(
+                    &ev_tx,
+                    SyncEvent::Started {
+                        kind: SyncKind::Comments,
+                        message: format!("comments {owner}/{repo}#{number}"),
+                    },
+                );
+                match load_comments(&db, &client, &owner, &repo, number, item_id).await {
+                    Ok(n) => emit(
+                        &ev_tx,
+                        SyncEvent::Finished {
+                            kind: SyncKind::Comments,
+                            fetched: 1,
+                            upserted: n,
+                            unread: 0,
+                            message: format!("{n} comments"),
+                        },
+                    ),
+                    Err(e) => emit(
+                        &ev_tx,
+                        SyncEvent::Failed {
+                            kind: SyncKind::Comments,
+                            error: e.to_string(),
+                        },
+                    ),
                 }
             }
         }
@@ -266,7 +259,8 @@ pub async fn run_once(db: &Db, cfg: &Config, full: bool) -> Result<SyncReport> {
     ensure_username(db, cfg, &client).await?;
     let (ev_tx, _ev_rx) = std::sync::mpsc::channel();
     if full || db.meta_get("backfill_done")?.as_deref() != Some("1") {
-        backfill(db, cfg, &client, &ev_tx).await
+        let days = if full { None } else { Some(cfg.backfill_days) };
+        search_created(db, cfg, &client, &ev_tx, days).await
     } else {
         incremental(db, cfg, &client, &ev_tx).await
     }
@@ -286,17 +280,17 @@ async fn ensure_username(db: &Db, cfg: &Config, client: &GhClient) -> Result<Str
     Ok(login)
 }
 
-async fn backfill(
+async fn search_created(
     db: &Db,
     cfg: &Config,
     client: &GhClient,
     ev: &std::sync::mpsc::Sender<SyncEvent>,
+    created_days: Option<u32>,
 ) -> Result<SyncReport> {
     let me = ensure_username(db, cfg, client).await?;
-    let since = TimeRange::Days(cfg.backfill_days)
-        .github_since_date()
-        .unwrap_or_else(|| "2000-01-01".into());
-    let queries = search_queries(&me, &since);
+    let since = created_days.and_then(|d| TimeRange::Days(d).github_since_date());
+    let qualifier = since.as_deref().map(|d| ("created", d));
+    let queries = search_queries(&me, qualifier);
     let mut fetched = 0u32;
     let mut upserted = 0u32;
 
@@ -352,7 +346,10 @@ async fn backfill(
         fetched,
         upserted,
         unread: 0,
-        message: format!("backfill stored {upserted} items ({fetched} search pages)"),
+        message: match created_days {
+            Some(d) => format!("synced {upserted} items created in last {d}d ({fetched} pages)"),
+            None => format!("synced {upserted} items ({fetched} search pages)"),
+        },
     })
 }
 
@@ -570,7 +567,7 @@ async fn maybe_safety_search(
         },
     );
     // One involves query is enough as a net — reviewed-by is covered on the 6h cadence too.
-    for (query, hint) in search_queries(me, &since) {
+    for (query, hint) in search_queries(me, Some(("updated", since.as_str()))) {
         let page = client.search(&query, None).await?;
         for item in &page.items {
             if repo_allowed(cfg, &item.owner, &item.repo) {

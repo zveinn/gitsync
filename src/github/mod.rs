@@ -563,16 +563,25 @@ fn urlencoding_lite(s: &str) -> String {
     out
 }
 
-pub fn search_queries(username: &str, since: &str) -> Vec<(String, Option<Role>)> {
+/// `qualifier` is e.g. `("created", "2026-01-01")` or `("updated", …)`.
+/// `None` means no date bound (entire involvement history, GitHub's 1000-hit cap).
+pub fn search_queries(
+    username: &str,
+    qualifier: Option<(&str, &str)>,
+) -> Vec<(String, Option<Role>)> {
     let u = quote_user(username);
+    let extra = match qualifier {
+        Some((key, value)) => format!(" {key}:>={value}"),
+        None => String::new(),
+    };
     vec![
-        (format!("involves:{u} updated:>={since}"), None),
+        (format!("involves:{u}{extra}"), None),
         (
-            format!("is:pr reviewed-by:{u} updated:>={since}"),
+            format!("is:pr reviewed-by:{u}{extra}"),
             Some(Role::Reviewed),
         ),
         (
-            format!("is:pr review-requested:{u} updated:>={since}"),
+            format!("is:pr review-requested:{u}{extra}"),
             Some(Role::ReviewRequested),
         ),
     ]
@@ -617,6 +626,18 @@ mod tests {
 
     #[test]
     fn search_query_count() {
-        assert_eq!(search_queries("octo", "2026-01-01").len(), 3);
+        assert_eq!(
+            search_queries("octo", Some(("created", "2026-01-01"))).len(),
+            3
+        );
+        assert!(
+            search_queries("octo", Some(("created", "2026-01-01")))[0]
+                .0
+                .contains("created:>=2026-01-01")
+        );
+        assert!(
+            !search_queries("octo", None)[0].0.contains("created:")
+                && !search_queries("octo", None)[0].0.contains("updated:")
+        );
     }
 }
