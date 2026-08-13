@@ -71,6 +71,7 @@ pub(crate) struct App {
     table_state: ratatui::widgets::TableState,
     detail: Option<ItemDetail>,
     detail_scroll: u16,
+    preview_open: bool,
     focus: Focus,
     mode: Mode,
     filter_buf: String,
@@ -112,6 +113,7 @@ impl App {
             table_state: ratatui::widgets::TableState::default(),
             detail: None,
             detail_scroll: 0,
+            preview_open: false,
             focus: Focus::List,
             mode: Mode::Normal,
             filter_buf: String::new(),
@@ -268,18 +270,23 @@ impl App {
                 self.filter_buf = self.query.search.clone();
             }
             KeyCode::Esc => {
-                if !self.query.search.is_empty() {
+                if self.preview_open {
+                    self.close_preview();
+                } else if !self.query.search.is_empty() {
                     self.query.search.clear();
                     self.filter_buf.clear();
                     self.reload();
                 }
             }
             KeyCode::Tab => {
-                self.focus = match self.focus {
-                    Focus::List => Focus::Detail,
-                    Focus::Detail => Focus::List,
-                };
+                if self.preview_open {
+                    self.focus = match self.focus {
+                        Focus::List => Focus::Detail,
+                        Focus::Detail => Focus::List,
+                    };
+                }
             }
+            KeyCode::Char('i') => self.toggle_preview(),
             KeyCode::Char('h') | KeyCode::Left => self.shift_view(-1),
             KeyCode::Char('l') | KeyCode::Right => self.shift_view(1),
             KeyCode::Char('j') | KeyCode::Down => self.move_sel(1),
@@ -293,7 +300,7 @@ impl App {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     || matches!(key.code, KeyCode::PageDown) =>
             {
-                if self.focus == Focus::Detail {
+                if self.preview_open && self.focus == Focus::Detail {
                     self.detail_scroll = self.detail_scroll.saturating_add(8);
                 } else {
                     self.move_sel(10);
@@ -303,7 +310,7 @@ impl App {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     || matches!(key.code, KeyCode::PageUp) =>
             {
-                if self.focus == Focus::Detail {
+                if self.preview_open && self.focus == Focus::Detail {
                     self.detail_scroll = self.detail_scroll.saturating_sub(8);
                 } else {
                     self.move_sel(-10);
@@ -351,7 +358,7 @@ impl App {
     }
 
     fn move_sel(&mut self, delta: i32) {
-        if self.focus == Focus::Detail {
+        if self.preview_open && self.focus == Focus::Detail {
             if delta > 0 {
                 self.detail_scroll = self.detail_scroll.saturating_add(delta as u16);
             } else {
@@ -463,6 +470,32 @@ impl App {
             item_id: item.id,
         });
         self.set_status(StatusKind::Info, "refreshing item");
+    }
+
+    fn toggle_preview(&mut self) {
+        if self.preview_open {
+            self.close_preview();
+            return;
+        }
+        if self.items.is_empty() {
+            self.set_status(StatusKind::Info, "nothing to preview");
+            return;
+        }
+        self.preview_open = true;
+        self.focus = Focus::Detail;
+        self.detail_scroll = 0;
+        self.load_detail();
+        if let Some(d) = &self.detail {
+            if d.comments_fetched_at.is_none() {
+                self.request_comments();
+            }
+        }
+    }
+
+    fn close_preview(&mut self) {
+        self.preview_open = false;
+        self.focus = Focus::List;
+        self.detail_scroll = 0;
     }
 
     fn shift_view(&mut self, delta: i32) {

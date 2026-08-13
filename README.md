@@ -99,8 +99,10 @@ from rotting in the cache — the bug the old `--time` window had to special-cas
 | Key | Action |
 |-----|--------|
 | `h` `l` | Previous / next view |
-| `j` `k` | Move (list, or detail when focused) |
-| `tab` | Toggle list / detail |
+| `j` `k` | Move in the list (or scroll the preview when it is focused) |
+| `i` | Open / close the right preview (3/4 width) |
+| `tab` | Toggle list / preview focus |
+| `esc` | Close the preview |
 | `/` | Filter title, repo, author, number |
 | `t` | Cycle time window (`1d` → `3d` → `7d` → `30d` → `90d` → `1y` → all) |
 | `s` | Cycle open / all / closed (Pulls, Issues, All) |

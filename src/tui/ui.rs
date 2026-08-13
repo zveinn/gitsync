@@ -136,10 +136,14 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
-    let rows =
-        Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(area);
-    draw_list(frame, app, rows[0]);
-    draw_detail(frame, app, rows[1]);
+    if app.preview_open {
+        let cols = Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(75)])
+            .split(area);
+        draw_list(frame, app, cols[0]);
+        draw_detail(frame, app, cols[1]);
+    } else {
+        draw_list(frame, app, area);
+    }
 }
 
 fn pane(focused: bool) -> Block<'static> {
@@ -183,39 +187,60 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let show_review = area.width >= 96;
-    let repo_w = if area.width >= 110 { 24 } else { 20 };
+    let compact = area.width < 64;
+    let show_review = !compact && area.width >= 96;
+    let repo_w = if area.width >= 110 {
+        24
+    } else if compact {
+        16
+    } else {
+        20
+    };
 
-    let mut widths = vec![
-        Constraint::Length(1),
-        Constraint::Length(10),
-        Constraint::Length(7),
-        Constraint::Length(repo_w),
-        Constraint::Min(16),
-        Constraint::Length(5),
-    ];
-    if show_review {
-        widths.push(Constraint::Length(6));
-    }
-
-    let header_style = Style::new().fg(Theme::FAINT);
-    let mut header_cells = vec![
-        Cell::from(""),
-        Cell::from("role").style(header_style),
-        Cell::from("state").style(header_style),
-        Cell::from("repository").style(header_style),
-        Cell::from("title").style(header_style),
-        Cell::from("age").style(header_style),
-    ];
-    if show_review {
-        header_cells.push(Cell::from("review").style(header_style));
-    }
+    let (widths, header_cells) = if compact {
+        let header_style = Style::new().fg(Theme::FAINT);
+        (
+            vec![
+                Constraint::Length(1),
+                Constraint::Length(repo_w),
+                Constraint::Min(8),
+            ],
+            vec![
+                Cell::from(""),
+                Cell::from("repo").style(header_style),
+                Cell::from("title").style(header_style),
+            ],
+        )
+    } else {
+        let header_style = Style::new().fg(Theme::FAINT);
+        let mut widths = vec![
+            Constraint::Length(1),
+            Constraint::Length(10),
+            Constraint::Length(7),
+            Constraint::Length(repo_w),
+            Constraint::Min(16),
+            Constraint::Length(5),
+        ];
+        let mut header_cells = vec![
+            Cell::from(""),
+            Cell::from("role").style(header_style),
+            Cell::from("state").style(header_style),
+            Cell::from("repository").style(header_style),
+            Cell::from("title").style(header_style),
+            Cell::from("age").style(header_style),
+        ];
+        if show_review {
+            widths.push(Constraint::Length(6));
+            header_cells.push(Cell::from("review").style(header_style));
+        }
+        (widths, header_cells)
+    };
     let header = Row::new(header_cells).height(1);
 
     let rows: Vec<Row> = app
         .items
         .iter()
-        .map(|item| item_row(item, show_review))
+        .map(|item| item_row(item, show_review, compact))
         .collect();
 
     let table = Table::new(rows, widths)
@@ -228,7 +253,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut app.table_state);
 }
 
-fn item_row(item: &ItemRow, show_review: bool) -> Row<'static> {
+fn item_row(item: &ItemRow, show_review: bool, compact: bool) -> Row<'static> {
     let unread = if item.unread {
         Cell::from("●").style(Style::new().fg(Theme::AMBER).bold())
     } else {
@@ -240,6 +265,15 @@ fn item_row(item: &ItemRow, show_review: bool) -> Row<'static> {
     } else {
         (state_label(item.state), state_color(item.state))
     };
+    if compact {
+        return Row::new(vec![
+            unread,
+            Cell::from(format!("{}#{}", item.repo, item.number))
+                .style(Style::new().fg(Theme::BLUE)),
+            Cell::from(item.title.clone()).style(Style::new().fg(Theme::TEXT)),
+        ])
+        .height(1);
+    }
     let mut cells = vec![
         unread,
         Cell::from(role_label(role)).style(Style::new().fg(role_color(role))),
@@ -277,14 +311,17 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Detail && app.mode == Mode::Normal;
     let Some(d) = &app.detail else {
         frame.render_widget(
-            Paragraph::new("Select an item")
-                .block(pane(focused).title(Span::styled(" detail ", Style::new().fg(Theme::MUTED))))
+            Paragraph::new("Select an item, then press i")
+                .block(
+                    pane(focused).title(Span::styled(" preview ", Style::new().fg(Theme::MUTED))),
+                )
                 .fg(Theme::DIM),
             area,
         );
         return;
     };
 
+    let width = area.width.saturating_sub(6) as usize;
     let mut lines: Vec<Line> = Vec::new();
     let mut ident = vec![
         Span::styled(
@@ -309,7 +346,11 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         d.row.title.clone(),
         Style::new().fg(Theme::TEXT).add_modifier(Modifier::BOLD),
     )));
+    if let Some(url) = &d.row.html_url {
+        lines.push(Line::styled(url.clone(), Style::new().fg(Theme::FAINT)));
+    }
     lines.push(Line::from(""));
+    lines.push(section("people"));
 
     let roles: Vec<Span> = {
         let mut s = vec![label("roles")];
@@ -335,40 +376,70 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(vec![
         label("author"),
         Span::styled(author, Style::new().fg(Theme::GREEN)),
-        Span::raw("    "),
+    ]));
+    lines.push(Line::from(vec![
         label("assignees"),
         Span::styled(assignees, Style::new().fg(Theme::TEXT)),
     ]));
 
-    if d.row.kind == crate::model::Kind::Pr && d.row.review_total > 0 {
-        let color = if d.row.approvals >= d.row.review_total {
-            Theme::GREEN
-        } else {
-            Theme::AMBER
-        };
-        lines.push(Line::from(vec![
-            label("review"),
-            Span::styled(d.row.review_summary(), Style::new().fg(color)),
-        ]));
-    }
-    if !d.reviews.is_empty() {
-        let mut parts = vec![label("")];
-        for (i, rev) in d.reviews.iter().take(8).enumerate() {
-            if i > 0 {
-                parts.push(Span::styled("   ", Style::new()));
-            }
-            parts.push(Span::styled(
-                format!("{} ", rev.author),
-                Style::new().fg(Theme::MUTED),
-            ));
-            parts.push(Span::styled(
-                short_review(&rev.state),
-                Style::new().fg(review_color(&rev.state)),
-            ));
+    if d.row.kind == crate::model::Kind::Pr {
+        lines.push(Line::from(""));
+        lines.push(section("review"));
+        if d.row.review_total > 0 {
+            let color = if d.row.approvals >= d.row.review_total {
+                Theme::GREEN
+            } else {
+                Theme::AMBER
+            };
+            lines.push(Line::from(vec![
+                label("progress"),
+                Span::styled(d.row.review_summary(), Style::new().fg(color)),
+                Span::styled(
+                    format!("   {} of {} approved", d.row.approvals, d.row.review_total),
+                    Style::new().fg(Theme::DIM),
+                ),
+            ]));
         }
-        lines.push(Line::from(parts));
+        if d.reviews.is_empty() {
+            lines.push(Line::from(vec![
+                label(""),
+                Span::styled("no reviews yet", Style::new().fg(Theme::FAINT)),
+            ]));
+        } else {
+            for rev in &d.reviews {
+                let when = rev
+                    .submitted_at
+                    .as_deref()
+                    .map(relative)
+                    .unwrap_or_default();
+                lines.push(Line::from(vec![
+                    label(""),
+                    Span::styled(
+                        format!("{:<16}", truncate_width(&rev.author, 16)),
+                        Style::new().fg(Theme::MUTED),
+                    ),
+                    Span::styled(
+                        format!("{:<10}", short_review(&rev.state)),
+                        Style::new().fg(review_color(&rev.state)),
+                    ),
+                    Span::styled(when, Style::new().fg(Theme::FAINT)),
+                ]));
+                if !rev.body.trim().is_empty() {
+                    for wrapped in wrap_text(rev.body.trim(), width.saturating_sub(12).max(20)) {
+                        lines.push(Line::from(vec![
+                            label(""),
+                            Span::styled(wrapped, Style::new().fg(Theme::TEXT)),
+                        ]));
+                    }
+                }
+            }
+        }
     }
 
+    if !d.labels.is_empty() || !d.links.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section("context"));
+    }
     if !d.labels.is_empty() {
         let mut parts = vec![label("labels")];
         for lab in &d.labels {
@@ -380,9 +451,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         }
         lines.push(Line::from(parts));
     }
-
     if !d.links.is_empty() {
-        let mut parts = vec![label("linked")];
         for link in &d.links {
             let tag = match link.kind {
                 crate::model::LinkKind::Closes => "closes",
@@ -392,70 +461,109 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
                 .state
                 .map(|s| format!(" {}", state_label(s)))
                 .unwrap_or_default();
-            parts.push(Span::styled(
-                format!("{tag} {}#{}{st}   ", link.repo, link.number),
-                Style::new().fg(Theme::BLUE),
-            ));
+            let title = link.title.clone().unwrap_or_default();
+            lines.push(Line::from(vec![
+                label(tag),
+                Span::styled(
+                    format!("{}#{}{st}", link.repo, link.number),
+                    Style::new().fg(Theme::BLUE),
+                ),
+                Span::raw("  "),
+                Span::styled(title, Style::new().fg(Theme::MUTED)),
+            ]));
         }
-        lines.push(Line::from(parts));
     }
 
-    let mut meta = String::new();
+    lines.push(Line::from(""));
+    lines.push(section("timeline"));
     if let Some(c) = &d.created_at {
-        meta.push_str(&format!("created {}   ", relative(c)));
-    }
-    if let Some(u) = &d.row.updated_at {
-        meta.push_str(&format!("updated {}   ", relative(u)));
-    }
-    match (d.row.additions, d.row.deletions, d.changed_files) {
-        (Some(a), Some(del), Some(f)) => meta.push_str(&format!("+{a}/-{del} in {f} files")),
-        (Some(a), Some(del), _) => meta.push_str(&format!("+{a}/-{del}")),
-        _ => {}
-    }
-    if !meta.is_empty() {
         lines.push(Line::from(vec![
-            label("meta"),
-            Span::styled(meta, Style::new().fg(Theme::DIM)),
+            label("created"),
+            Span::styled(relative(c), Style::new().fg(Theme::DIM)),
         ]));
     }
-
-    lines.push(Line::from(""));
-    let width = area.width.saturating_sub(6) as usize;
-    for wrapped in wrap_text(d.body.trim(), width.max(20)) {
-        lines.push(Line::styled(wrapped, Style::new().fg(Theme::TEXT)));
+    if let Some(u) = &d.row.updated_at {
+        lines.push(Line::from(vec![
+            label("updated"),
+            Span::styled(relative(u), Style::new().fg(Theme::DIM)),
+        ]));
+    }
+    if let Some(c) = &d.closed_at {
+        lines.push(Line::from(vec![
+            label("closed"),
+            Span::styled(relative(c), Style::new().fg(Theme::DIM)),
+        ]));
+    }
+    if let Some(m) = &d.merged_at {
+        lines.push(Line::from(vec![
+            label("merged"),
+            Span::styled(relative(m), Style::new().fg(Theme::DIM)),
+        ]));
+    }
+    match (d.row.additions, d.row.deletions, d.changed_files) {
+        (Some(a), Some(del), Some(f)) => lines.push(Line::from(vec![
+            label("diff"),
+            Span::styled(
+                format!("+{a} / -{del}   {f} files"),
+                Style::new().fg(Theme::DIM),
+            ),
+        ])),
+        (Some(a), Some(del), _) => lines.push(Line::from(vec![
+            label("diff"),
+            Span::styled(format!("+{a} / -{del}"), Style::new().fg(Theme::DIM)),
+        ])),
+        _ => {}
     }
 
     lines.push(Line::from(""));
+    lines.push(section("body"));
+    let body = d.body.trim();
+    if body.is_empty() {
+        lines.push(Line::styled(
+            "no description",
+            Style::new().fg(Theme::FAINT),
+        ));
+    } else {
+        for wrapped in wrap_text(body, width.max(20)) {
+            lines.push(Line::styled(wrapped, Style::new().fg(Theme::TEXT)));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(section(&format!(
+        "comments  {}",
+        if d.comments.is_empty() {
+            d.comments_count.to_string()
+        } else {
+            d.comments.len().to_string()
+        }
+    )));
     if d.comments.is_empty() {
         let hint = if d.comments_count > 0 {
-            format!("{} comments  ·  press c to load", d.comments_count)
+            "loading comments…  ·  c to retry"
         } else {
-            "no comments loaded  ·  press c to fetch".into()
+            "no comments  ·  c to fetch"
         };
         lines.push(Line::styled(hint, Style::new().fg(Theme::FAINT).italic()));
     } else {
-        lines.push(Line::styled(
-            format!("comments  {}", d.comments.len()),
-            Style::new().fg(Theme::DIM),
-        ));
         for cm in &d.comments {
             let when = cm.created_at.as_deref().map(relative).unwrap_or_default();
+            lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::styled(format!("@{}  ", cm.author), Style::new().fg(Theme::ACCENT)),
-                Span::styled(when, Style::new().fg(Theme::FAINT)),
+                Span::styled(
+                    format!("{when}  {}", cm.kind),
+                    Style::new().fg(Theme::FAINT),
+                ),
             ]));
             for wrapped in wrap_text(cm.body.trim(), width.max(20)) {
-                lines.push(Line::styled(
-                    format!("  {wrapped}"),
-                    Style::new().fg(Theme::TEXT),
-                ));
+                lines.push(Line::styled(wrapped, Style::new().fg(Theme::TEXT)));
             }
-            lines.push(Line::from(""));
         }
     }
 
     let block = pane(focused).title(Span::styled(
-        " detail    tab focus  ·  J/K scroll  ·  c comments  ·  o open ",
+        " preview    i close  ·  tab list  ·  j/k scroll  ·  c comments  ·  o open ",
         Style::new().fg(Theme::FAINT),
     ));
     frame.render_widget(
@@ -465,6 +573,13 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn section(title: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("── {title} "),
+        Style::new().fg(Theme::FAINT),
+    ))
 }
 
 fn label(text: &str) -> Span<'static> {
@@ -495,7 +610,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             app.items.len()
         )
     };
-    let keys = "h/l views   j/k   / filter   t time   o open   ?";
+    let keys = "i preview   h/l views   j/k   / filter   o open   ?";
     let line = Line::from(vec![
         Span::styled(format!(" {left} "), Style::new().fg(msg_fg).bg(msg_bg)),
         Span::raw(" "),
@@ -527,11 +642,13 @@ Views   (h / l  or  ← →)
 
 Movement
   h/l           previous / next view
-  j/k           list  (or detail when focused)
-  tab           toggle list / detail
+  j/k           list  (or preview when focused)
+  i             open / close preview (right, 3/4 width)
+  tab           list / preview  (when preview is open)
+  esc           close preview
   g / G         top / bottom
   n / N         next / previous unread
-  J / K         scroll detail
+  J / K         scroll preview
   /             filter title, repo, author, number
   t             cycle time window
   s             cycle open / all / closed
