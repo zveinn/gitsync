@@ -348,6 +348,7 @@ impl App {
             KeyCode::Char('n') => self.next_unread(1),
             KeyCode::Char('N') => self.next_unread(-1),
             KeyCode::Char('o') | KeyCode::Enter => self.open_browser(),
+            KeyCode::Char('y') => self.copy_url(),
             KeyCode::Char('c') => self.request_comments(),
             KeyCode::Char('r') => self.refresh_selected(),
             KeyCode::Char('R') => {
@@ -447,23 +448,49 @@ impl App {
         );
     }
 
-    fn open_browser(&mut self) {
-        let url = if let Some(link) = self.selected_link() {
-            Some(format!(
+    fn selected_url(&self) -> Option<String> {
+        if let Some(link) = self.selected_link() {
+            return Some(format!(
                 "https://github.com/{}/issues/{}",
                 link.repo, link.number
-            ))
+            ));
+        }
+        if let Some(url) = self.current_item().and_then(|i| i.html_url.clone()) {
+            return Some(url);
+        }
+        if let Some(url) = self.detail.as_ref().and_then(|d| d.row.html_url.clone()) {
+            return Some(url);
+        }
+        let item = self.current_item()?;
+        let kind = if item.kind == crate::model::Kind::Pr {
+            "pull"
         } else {
-            self.current_item()
-                .and_then(|i| i.html_url.clone())
-                .or_else(|| self.detail.as_ref().and_then(|d| d.row.html_url.clone()))
+            "issues"
         };
-        match url {
+        Some(format!(
+            "https://github.com/{}/{}/{kind}/{}",
+            item.owner, item.repo, item.number
+        ))
+    }
+
+    fn open_browser(&mut self) {
+        match self.selected_url() {
             Some(url) => match open::that(&url) {
                 Ok(()) => self.set_status(StatusKind::Ok, "opened in browser"),
                 Err(e) => self.set_status(StatusKind::Err, e.to_string()),
             },
             None => self.set_status(StatusKind::Warn, "no url"),
+        }
+    }
+
+    fn copy_url(&mut self) {
+        let Some(url) = self.selected_url() else {
+            self.set_status(StatusKind::Warn, "no url");
+            return;
+        };
+        match crate::clipboard::copy_text(&url) {
+            Ok(()) => self.set_status(StatusKind::Ok, format!("copied {url}")),
+            Err(e) => self.set_status(StatusKind::Err, format!("copy failed: {e}")),
         }
     }
 

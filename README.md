@@ -108,6 +108,7 @@ from rotting in the cache — the bug the old `--time` window had to special-cas
 | `s` | (unused — each view already picks open or closed) |
 | `m` | Toggle local read/unread |
 | `n` `N` | Next / previous unread |
+| `y` | Copy the GitHub URL (OSC 52, works over SSH) |
 | `o` / `enter` | Open in browser |
 | `c` | Fetch comments for the selected item |
 | `r` | Refresh this item |

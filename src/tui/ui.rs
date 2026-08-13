@@ -656,7 +656,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             app.items.len()
         )
     };
-    let keys = "i preview   h/l views   j/k   / filter   o open   ?";
+    let keys = "i preview   y copy   h/l views   j/k   / filter   o open   ?";
     let line = Line::from(vec![
         Span::styled(format!(" {left} "), Style::new().fg(msg_fg).bg(msg_bg)),
         Span::raw(" "),
@@ -697,6 +697,7 @@ Movement
   t             cycle time window (closed views)
 
 Actions
+  y             copy GitHub URL (works over SSH)
   o  enter      open in browser
   m             toggle local read/unread
   c             fetch comments
