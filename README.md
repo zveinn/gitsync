@@ -105,6 +105,8 @@ from rotting in the cache — the bug the old `--time` window had to special-cas
 | `esc` | Close the preview |
 | `/` | Filter title, repo, author, number |
 | `r` | Sync menu: this item, created last 7/30/60/90 days, or all |
+| `t` | Toggle linked items for the selected PR/issue |
+| `T` | Toggle linked items for the whole list |
 | `m` | Toggle local read/unread |
 | `n` `N` | Next / previous unread |
 | `y` | Copy the GitHub URL (OSC 52, works over SSH) |

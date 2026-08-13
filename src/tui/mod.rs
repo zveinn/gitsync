@@ -1,5 +1,6 @@
 mod ui;
 
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -94,6 +95,8 @@ pub(crate) struct App {
     mode: Mode,
     filter_buf: String,
     sync_choice: usize,
+    show_links: bool,
+    link_override: HashSet<i64>,
     status: Status,
     syncing: bool,
     sync_label: String,
@@ -139,6 +142,8 @@ impl App {
             mode: Mode::Normal,
             filter_buf: String::new(),
             sync_choice: 0,
+            show_links: true,
+            link_override: HashSet::new(),
             status: Status {
                 message: "local cache · syncing in background".into(),
                 kind: StatusKind::Info,
@@ -354,6 +359,8 @@ impl App {
                     );
                 }
             }
+            KeyCode::Char('t') => self.toggle_selected_links(),
+            KeyCode::Char('T') => self.toggle_all_links(),
             KeyCode::Char('m') => self.toggle_read(),
             KeyCode::Char('n') => self.next_unread(1),
             KeyCode::Char('N') => self.next_unread(-1),
@@ -676,10 +683,69 @@ impl App {
         self.reload();
     }
 
+    fn item_shows_links(&self, id: i64) -> bool {
+        self.show_links ^ self.link_override.contains(&id)
+    }
+
+    fn relayout_links(&mut self) {
+        let keep = self.current_item().map(|i| i.id);
+        self.rebuild_flat();
+        let idx = keep
+            .and_then(|id| {
+                self.flat.iter().position(|row| {
+                    matches!(row, FlatRow::Item(i) if self.items.get(*i).is_some_and(|it| it.id == id))
+                })
+            })
+            .unwrap_or(0);
+        self.select_abs(idx);
+    }
+
+    fn toggle_selected_links(&mut self) {
+        if self.query.view == View::Inbox {
+            return;
+        }
+        let Some(id) = self.current_item().map(|i| i.id) else {
+            return;
+        };
+        if !self.link_override.remove(&id) {
+            self.link_override.insert(id);
+        }
+        let on = self.item_shows_links(id);
+        self.relayout_links();
+        self.set_status(
+            StatusKind::Info,
+            if on {
+                "linked items on for this item"
+            } else {
+                "linked items off for this item"
+            },
+        );
+    }
+
+    fn toggle_all_links(&mut self) {
+        if self.query.view == View::Inbox {
+            return;
+        }
+        self.show_links = !self.show_links;
+        self.link_override.clear();
+        self.relayout_links();
+        self.set_status(
+            StatusKind::Info,
+            if self.show_links {
+                "linked items on"
+            } else {
+                "linked items off"
+            },
+        );
+    }
+
     fn rebuild_flat(&mut self) {
         self.flat.clear();
         for (i, item) in self.items.iter().enumerate() {
             self.flat.push(FlatRow::Item(i));
+            if !self.item_shows_links(item.id) {
+                continue;
+            }
             for (j, link) in item.links.iter().enumerate() {
                 if item.shows_nested(link) {
                     self.flat.push(FlatRow::Child { parent: i, link: j });

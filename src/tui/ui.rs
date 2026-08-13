@@ -413,21 +413,22 @@ fn child_row(link: &IssueLink, show_review: bool, compact: bool) -> Row<'static>
     let title = link.title.clone().unwrap_or_default();
     if compact {
         return Row::new(vec![
-            Cell::from("↳").style(Style::new().fg(Theme::FAINT)),
-            Cell::from(format!("{}#{}", short_repo(&link.repo), link.number))
+            Cell::from(" ").style(Style::new().fg(Theme::FAINT)),
+            Cell::from(format!("    {}#{}", short_repo(&link.repo), link.number))
                 .style(Style::new().fg(Theme::BLUE)),
-            Cell::from(title).style(Style::new().fg(Theme::MUTED)),
+            Cell::from(format!("    {title}")).style(Style::new().fg(Theme::MUTED)),
         ])
         .height(1);
     }
     let state_text = link.state.map(state_label).unwrap_or("");
     let state_fg = link.state.map(state_color).unwrap_or(Theme::DIM);
     let mut cells = vec![
-        Cell::from("↳").style(Style::new().fg(Theme::FAINT)),
-        Cell::from(tag).style(Style::new().fg(Theme::DIM).italic()),
-        Cell::from(state_text).style(Style::new().fg(state_fg)),
-        Cell::from(format!("{}#{}", link.repo, link.number)).style(Style::new().fg(Theme::BLUE)),
-        Cell::from(title).style(Style::new().fg(Theme::MUTED)),
+        Cell::from(" ").style(Style::new().fg(Theme::FAINT)),
+        Cell::from(format!("    {tag}")).style(Style::new().fg(Theme::DIM).italic()),
+        Cell::from(format!("    {state_text}")).style(Style::new().fg(state_fg)),
+        Cell::from(format!("    {}#{}", link.repo, link.number))
+            .style(Style::new().fg(Theme::BLUE)),
+        Cell::from(format!("    {title}")).style(Style::new().fg(Theme::MUTED)),
         Cell::from("").style(Style::new().fg(Theme::DIM)),
     ];
     if show_review {
@@ -759,7 +760,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             app.items.len()
         )
     };
-    let keys = "r sync   i preview   y copy   h/l views   j/k   / filter   o open   ?";
+    let keys = "r sync   t link   T all links   i preview   y copy   h/l views   j/k   / filter   ?";
     let line = Line::from(vec![
         Span::styled(format!(" {left} "), Style::new().fg(msg_fg).bg(msg_bg)),
         Span::raw(" "),
@@ -798,6 +799,8 @@ Movement
   n / N         next / previous unread
   J / K         scroll preview
   /             filter title, repo, author, number
+  t             toggle linked items for the selected PR/issue
+  T             toggle linked items for the whole list
 
 Actions
   y             copy GitHub URL (works over SSH)
