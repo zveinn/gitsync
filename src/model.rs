@@ -330,6 +330,10 @@ impl ItemRow {
     pub fn nested_links(&self) -> impl Iterator<Item = &IssueLink> {
         self.links.iter().filter(|link| self.shows_nested(link))
     }
+
+    pub fn linked_count(&self) -> usize {
+        self.nested_links().count()
+    }
 }
 
 /// Unique requested/reviewing people vs how many have approved.

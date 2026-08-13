@@ -229,6 +229,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(repo_w),
             Constraint::Min(16),
             Constraint::Length(5),
+            Constraint::Length(6),
         ];
         let mut header_cells = vec![
             Cell::from(""),
@@ -237,6 +238,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             Cell::from("repository").style(header_style),
             Cell::from("title").style(header_style),
             Cell::from("age").style(header_style),
+            Cell::from("linked").style(header_style),
         ];
         if show_review {
             widths.push(Constraint::Length(6));
@@ -390,6 +392,7 @@ fn item_row(item: &ItemRow, show_review: bool, compact: bool) -> Row<'static> {
                 .unwrap_or_default(),
         )
         .style(Style::new().fg(Theme::DIM)),
+        linked_cell(item.linked_count()),
     ];
     if show_review {
         let text = item.review_summary();
@@ -430,6 +433,7 @@ fn child_row(link: &IssueLink, show_review: bool, compact: bool) -> Row<'static>
             .style(Style::new().fg(Theme::BLUE)),
         Cell::from(format!("    {title}")).style(Style::new().fg(Theme::MUTED)),
         Cell::from("").style(Style::new().fg(Theme::DIM)),
+        Cell::from(""),
     ];
     if show_review {
         cells.push(Cell::from(""));
@@ -439,6 +443,14 @@ fn child_row(link: &IssueLink, show_review: bool, compact: bool) -> Row<'static>
 
 fn short_repo(repo: &str) -> &str {
     repo.rsplit_once('/').map(|(_, n)| n).unwrap_or(repo)
+}
+
+fn linked_cell(n: usize) -> Cell<'static> {
+    if n == 0 {
+        Cell::from("").style(Style::new().fg(Theme::FAINT))
+    } else {
+        Cell::from(n.to_string()).style(Style::new().fg(Theme::ACCENT))
+    }
 }
 
 fn format_repo(owner: &str, repo: &str, number: i64) -> String {
