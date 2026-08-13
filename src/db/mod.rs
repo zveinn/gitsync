@@ -1,0 +1,916 @@
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use anyhow::{Context, Result};
+use rusqlite::{Connection, OptionalExtension, params};
+
+use crate::model::{
+    Comment, HydratedItem, IssueLink, ItemDetail, ItemQuery, ItemRow, ItemState, Kind, Label,
+    LinkKind, Review, Role, StateFilter, View, review_progress,
+};
+use crate::timeutil::now_rfc3339;
+
+const SCHEMA: &str = include_str!("schema.sql");
+
+#[derive(Clone)]
+pub struct Db {
+    inner: Arc<Mutex<Connection>>,
+    pub path: PathBuf,
+}
+
+impl Db {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
+        conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(conn)),
+            path,
+        })
+    }
+
+    pub fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let conn = self.inner.lock().expect("db mutex poisoned");
+        f(&conn)
+    }
+
+    pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                r.get(0)
+            })
+            .optional()
+            .context("meta_get")
+        })
+    }
+
+    pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn upsert_item(
+        &self,
+        item: &HydratedItem,
+        extra_roles: &BTreeSet<Role>,
+        mark_unread: bool,
+        replace_field_roles: bool,
+    ) -> Result<i64> {
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let repo_id = {
+                tx.execute(
+                    "INSERT INTO repos(owner, name) VALUES (?1, ?2)
+                     ON CONFLICT(owner, name) DO NOTHING",
+                    params![item.owner, item.repo],
+                )?;
+                tx.query_row(
+                    "SELECT id FROM repos WHERE owner = ?1 AND name = ?2",
+                    params![item.owner, item.repo],
+                    |r| r.get::<_, i64>(0),
+                )?
+            };
+
+            let existing: Option<(i64, Option<String>, i64)> = tx
+                .query_row(
+                    "SELECT id, updated_at, unread FROM items WHERE repo_id = ?1 AND number = ?2",
+                    params![repo_id, item.number],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+
+            let newer = match (&existing, &item.updated_at) {
+                (Some((_, Some(prev), _)), Some(next)) => next.as_str() > prev.as_str(),
+                (None, _) => true,
+                _ => false,
+            };
+            let unread = if mark_unread && newer {
+                1
+            } else {
+                existing.map(|(_, _, u)| u).unwrap_or(0)
+            };
+
+            tx.execute(
+                "INSERT INTO items (
+                    repo_id, number, node_id, kind, title, body, state, author, draft, html_url,
+                    created_at, updated_at, closed_at, merged_at, comments_count, review_decision,
+                    additions, deletions, changed_files, unread, last_hydrated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13, ?14, ?15, ?16,
+                    ?17, ?18, ?19, ?20, ?21
+                 )
+                 ON CONFLICT(repo_id, number) DO UPDATE SET
+                    node_id = COALESCE(excluded.node_id, items.node_id),
+                    kind = excluded.kind,
+                    title = excluded.title,
+                    body = excluded.body,
+                    state = excluded.state,
+                    author = excluded.author,
+                    draft = excluded.draft,
+                    html_url = excluded.html_url,
+                    created_at = COALESCE(excluded.created_at, items.created_at),
+                    updated_at = excluded.updated_at,
+                    closed_at = excluded.closed_at,
+                    merged_at = excluded.merged_at,
+                    comments_count = excluded.comments_count,
+                    review_decision = excluded.review_decision,
+                    additions = excluded.additions,
+                    deletions = excluded.deletions,
+                    changed_files = excluded.changed_files,
+                    unread = excluded.unread,
+                    last_hydrated_at = excluded.last_hydrated_at",
+                params![
+                    repo_id,
+                    item.number,
+                    item.node_id,
+                    item.kind.as_str(),
+                    item.title,
+                    item.body,
+                    item.state.as_str(),
+                    item.author,
+                    item.draft as i64,
+                    item.html_url,
+                    item.created_at,
+                    item.updated_at,
+                    item.closed_at,
+                    item.merged_at,
+                    item.comments_count,
+                    item.review_decision,
+                    item.additions,
+                    item.deletions,
+                    item.changed_files,
+                    unread,
+                    now_rfc3339(),
+                ],
+            )?;
+
+            let id: i64 = tx.query_row(
+                "SELECT id FROM items WHERE repo_id = ?1 AND number = ?2",
+                params![repo_id, item.number],
+                |r| r.get(0),
+            )?;
+
+            if replace_field_roles {
+                tx.execute(
+                    "DELETE FROM item_roles WHERE item_id = ?1 AND role IN
+                     ('authored','assigned','reviewed','review_requested')",
+                    params![id],
+                )?;
+            }
+
+            let roles = extra_roles;
+            for role in roles {
+                tx.execute(
+                    "INSERT OR IGNORE INTO item_roles(item_id, role) VALUES (?1, ?2)",
+                    params![id, role.as_str()],
+                )?;
+            }
+
+            let count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM item_roles WHERE item_id = ?1 AND role != 'involved'",
+                params![id],
+                |r| r.get(0),
+            )?;
+            if count > 0 {
+                tx.execute(
+                    "DELETE FROM item_roles WHERE item_id = ?1 AND role = 'involved'",
+                    params![id],
+                )?;
+            } else {
+                tx.execute(
+                    "INSERT OR IGNORE INTO item_roles(item_id, role) VALUES (?1, 'involved')",
+                    params![id],
+                )?;
+            }
+
+            tx.execute("DELETE FROM item_labels WHERE item_id = ?1", params![id])?;
+            for label in &item.labels {
+                tx.execute(
+                    "INSERT OR IGNORE INTO item_labels(item_id, name, color) VALUES (?1, ?2, ?3)",
+                    params![id, label.name, label.color],
+                )?;
+            }
+
+            tx.execute("DELETE FROM item_assignees WHERE item_id = ?1", params![id])?;
+            for login in &item.assignees {
+                tx.execute(
+                    "INSERT OR IGNORE INTO item_assignees(item_id, login) VALUES (?1, ?2)",
+                    params![id, login],
+                )?;
+            }
+
+            tx.execute("DELETE FROM reviews WHERE item_id = ?1", params![id])?;
+            for rev in &item.reviews {
+                tx.execute(
+                    "INSERT INTO reviews(item_id, github_id, author, state, submitted_at, body)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        id,
+                        rev.github_id,
+                        rev.author,
+                        rev.state,
+                        rev.submitted_at,
+                        rev.body
+                    ],
+                )?;
+            }
+
+            tx.execute(
+                "DELETE FROM item_review_requests WHERE item_id = ?1",
+                params![id],
+            )?;
+            for login in &item.review_requests {
+                tx.execute(
+                    "INSERT OR IGNORE INTO item_review_requests(item_id, login) VALUES (?1, ?2)",
+                    params![id, login],
+                )?;
+            }
+
+            tx.execute("DELETE FROM links WHERE from_id = ?1", params![id])?;
+            for link in &item.links {
+                let to_id: Option<i64> = tx
+                    .query_row(
+                        "SELECT i.id FROM items i
+                         JOIN repos r ON r.id = i.repo_id
+                         WHERE lower(r.owner || '/' || r.name) = lower(?1) AND i.number = ?2",
+                        params![link.repo, link.number],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO links(from_id, to_repo, to_number, to_id, kind)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![id, link.repo, link.number, to_id, link.kind.as_str()],
+                )?;
+            }
+
+            tx.commit()?;
+            Ok(id)
+        })
+    }
+
+    pub fn add_role(&self, item_id: i64, role: Role) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO item_roles(item_id, role) VALUES (?1, ?2)",
+                params![item_id, role.as_str()],
+            )?;
+            if role != Role::Involved {
+                c.execute(
+                    "DELETE FROM item_roles WHERE item_id = ?1 AND role = 'involved'",
+                    params![item_id],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn set_unread(&self, id: i64, unread: bool) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE items SET unread = ?1 WHERE id = ?2",
+                params![unread as i64, id],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn replace_comments(&self, item_id: i64, comments: &[Comment]) -> Result<()> {
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            tx.execute("DELETE FROM comments WHERE item_id = ?1", params![item_id])?;
+            for cm in comments {
+                tx.execute(
+                    "INSERT INTO comments(item_id, github_id, kind, author, body, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        item_id,
+                        cm.github_id,
+                        cm.kind,
+                        cm.author,
+                        cm.body,
+                        cm.created_at
+                    ],
+                )?;
+            }
+            tx.execute(
+                "UPDATE items SET comments_fetched_at = ?1, comments_count = ?2 WHERE id = ?3",
+                params![now_rfc3339(), comments.len() as i64, item_id],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn list(&self, q: &ItemQuery) -> Result<Vec<ItemRow>> {
+        self.with(|c| {
+            let mut sql = String::from(
+                "SELECT i.id, r.owner, r.name, i.number, i.kind, i.title, i.state, i.author,
+                        i.draft, i.html_url, i.updated_at, i.review_decision, i.additions,
+                        i.deletions, i.unread
+                 FROM items i
+                 JOIN repos r ON r.id = i.repo_id
+                 WHERE 1=1",
+            );
+            let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+            apply_view_filter(&mut sql, q.view);
+            apply_state_filter(&mut sql, q);
+            apply_time_filter(&mut sql, q, &mut args);
+            apply_repo_filter(&mut sql, q, &mut args);
+            apply_search_filter(&mut sql, q, &mut args);
+
+            sql.push_str(" ORDER BY i.unread DESC, i.updated_at DESC");
+
+            let mut stmt = c.prepare(&sql)?;
+            let refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+            let rows = stmt.query_map(refs.as_slice(), |row| {
+                Ok(ItemRow {
+                    id: row.get(0)?,
+                    owner: row.get(1)?,
+                    repo: row.get(2)?,
+                    number: row.get(3)?,
+                    kind: Kind::parse(&row.get::<_, String>(4)?).unwrap_or(Kind::Issue),
+                    title: row.get(5)?,
+                    state: ItemState::parse(&row.get::<_, String>(6)?),
+                    author: row.get(7)?,
+                    draft: row.get::<_, i64>(8)? != 0,
+                    html_url: row.get(9)?,
+                    updated_at: row.get(10)?,
+                    review_decision: row.get(11)?,
+                    additions: row.get(12)?,
+                    deletions: row.get(13)?,
+                    unread: row.get::<_, i64>(14)? != 0,
+                    roles: BTreeSet::new(),
+                    approvals: 0,
+                    review_total: 0,
+                })
+            })?;
+
+            let mut items = Vec::new();
+            for row in rows {
+                items.push(row?);
+            }
+            drop(stmt);
+
+            if !items.is_empty() {
+                let ids: Vec<String> = items.iter().map(|i| i.id.to_string()).collect();
+                let in_list = ids.join(",");
+                let role_sql =
+                    format!("SELECT item_id, role FROM item_roles WHERE item_id IN ({in_list})");
+                let mut stmt = c.prepare(&role_sql)?;
+                let mut rows = stmt.query([])?;
+                let mut map: std::collections::HashMap<i64, BTreeSet<Role>> =
+                    std::collections::HashMap::new();
+                while let Some(row) = rows.next()? {
+                    let id: i64 = row.get(0)?;
+                    let role_s: String = row.get(1)?;
+                    if let Some(role) = Role::parse(&role_s) {
+                        map.entry(id).or_default().insert(role);
+                    }
+                }
+                for item in &mut items {
+                    item.roles = map.remove(&item.id).unwrap_or_default();
+                }
+                attach_review_progress(c, &mut items)?;
+            }
+            Ok(items)
+        })
+    }
+
+    pub fn count(&self, q: &ItemQuery) -> Result<usize> {
+        self.with(|c| {
+            let mut sql = String::from(
+                "SELECT COUNT(*) FROM items i JOIN repos r ON r.id = i.repo_id WHERE 1=1",
+            );
+            let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            apply_view_filter(&mut sql, q.view);
+            apply_state_filter(&mut sql, q);
+            apply_time_filter(&mut sql, q, &mut args);
+            apply_repo_filter(&mut sql, q, &mut args);
+            apply_search_filter(&mut sql, q, &mut args);
+            let mut stmt = c.prepare(&sql)?;
+            let refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+            let n: i64 = stmt.query_row(refs.as_slice(), |r| r.get(0))?;
+            Ok(n as usize)
+        })
+    }
+
+    pub fn counts_by_view(&self, base: &ItemQuery) -> Result<Vec<(View, usize)>> {
+        let mut out = Vec::new();
+        for view in View::ALL {
+            let mut q = base.clone();
+            q.view = view;
+            if !view.uses_state_filter() {
+                q.state = StateFilter::All;
+            }
+            out.push((view, self.count(&q)?));
+        }
+        Ok(out)
+    }
+
+    pub fn get_detail(&self, id: i64) -> Result<Option<ItemDetail>> {
+        self.with(|c| {
+            let row = c
+                .query_row(
+                    "SELECT i.id, r.owner, r.name, i.number, i.kind, i.title, i.state, i.author,
+                            i.draft, i.html_url, i.updated_at, i.review_decision, i.additions,
+                            i.deletions, i.unread, i.body, i.created_at, i.closed_at, i.merged_at,
+                            i.comments_count, i.changed_files, i.comments_fetched_at
+                     FROM items i JOIN repos r ON r.id = i.repo_id WHERE i.id = ?1",
+                    params![id],
+                    |r| {
+                        Ok((
+                            ItemRow {
+                                id: r.get(0)?,
+                                owner: r.get(1)?,
+                                repo: r.get(2)?,
+                                number: r.get(3)?,
+                                kind: Kind::parse(&r.get::<_, String>(4)?).unwrap_or(Kind::Issue),
+                                title: r.get(5)?,
+                                state: ItemState::parse(&r.get::<_, String>(6)?),
+                                author: r.get(7)?,
+                                draft: r.get::<_, i64>(8)? != 0,
+                                html_url: r.get(9)?,
+                                updated_at: r.get(10)?,
+                                review_decision: r.get(11)?,
+                                additions: r.get(12)?,
+                                deletions: r.get(13)?,
+                                unread: r.get::<_, i64>(14)? != 0,
+                                roles: BTreeSet::new(),
+                                approvals: 0,
+                                review_total: 0,
+                            },
+                            r.get::<_, String>(15)?,
+                            r.get::<_, Option<String>>(16)?,
+                            r.get::<_, Option<String>>(17)?,
+                            r.get::<_, Option<String>>(18)?,
+                            r.get::<_, i64>(19)?,
+                            r.get::<_, Option<i64>>(20)?,
+                            r.get::<_, Option<String>>(21)?,
+                        ))
+                    },
+                )
+                .optional()?;
+
+            let Some((mut row, body, created_at, closed_at, merged_at, comments_count, changed_files, comments_fetched_at)) =
+                row
+            else {
+                return Ok(None);
+            };
+
+            let mut roles = BTreeSet::new();
+            let mut stmt = c.prepare("SELECT role FROM item_roles WHERE item_id = ?1")?;
+            let rs = stmt.query_map(params![id], |r| r.get::<_, String>(0))?;
+            for r in rs {
+                if let Some(role) = Role::parse(&r?) {
+                    roles.insert(role);
+                }
+            }
+            row.roles = roles;
+
+            let mut labels = Vec::new();
+            let mut stmt = c.prepare("SELECT name, color FROM item_labels WHERE item_id = ?1")?;
+            let rs = stmt.query_map(params![id], |r| {
+                Ok(Label {
+                    name: r.get(0)?,
+                    color: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                })
+            })?;
+            for l in rs {
+                labels.push(l?);
+            }
+
+            let mut assignees = Vec::new();
+            let mut stmt = c.prepare("SELECT login FROM item_assignees WHERE item_id = ?1")?;
+            let rs = stmt.query_map(params![id], |r| r.get::<_, String>(0))?;
+            for a in rs {
+                assignees.push(a?);
+            }
+
+            let mut reviews = Vec::new();
+            let mut stmt = c.prepare(
+                "SELECT github_id, author, state, submitted_at, body FROM reviews WHERE item_id = ?1",
+            )?;
+            let rs = stmt.query_map(params![id], |r| {
+                Ok(Review {
+                    github_id: r.get(0)?,
+                    author: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    state: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    submitted_at: r.get(3)?,
+                    body: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                })
+            })?;
+            for rev in rs {
+                reviews.push(rev?);
+            }
+
+            let mut requested = Vec::new();
+            let mut stmt =
+                c.prepare("SELECT login FROM item_review_requests WHERE item_id = ?1")?;
+            let rs = stmt.query_map(params![id], |r| r.get::<_, String>(0))?;
+            for login in rs {
+                requested.push(login?);
+            }
+            let (approvals, review_total) = review_progress(&reviews, &requested);
+            row.approvals = approvals;
+            row.review_total = review_total;
+
+            let mut comments = Vec::new();
+            let mut stmt = c.prepare(
+                "SELECT github_id, kind, author, body, created_at FROM comments
+                 WHERE item_id = ?1 ORDER BY created_at ASC",
+            )?;
+            let rs = stmt.query_map(params![id], |r| {
+                Ok(Comment {
+                    github_id: r.get(0)?,
+                    kind: r.get(1)?,
+                    author: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    body: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    created_at: r.get(4)?,
+                })
+            })?;
+            for cm in rs {
+                comments.push(cm?);
+            }
+
+            let mut links = Vec::new();
+            let mut stmt = c.prepare(
+                "SELECT l.to_repo, l.to_number, l.kind, i.title, i.state
+                 FROM links l
+                 LEFT JOIN items i ON i.id = l.to_id
+                 WHERE l.from_id = ?1",
+            )?;
+            let rs = stmt.query_map(params![id], |r| {
+                Ok(IssueLink {
+                    repo: r.get(0)?,
+                    number: r.get(1)?,
+                    kind: LinkKind::parse(&r.get::<_, String>(2)?),
+                    title: r.get(3)?,
+                    state: r
+                        .get::<_, Option<String>>(4)?
+                        .map(|s| ItemState::parse(&s)),
+                })
+            })?;
+            for l in rs {
+                links.push(l?);
+            }
+
+            Ok(Some(ItemDetail {
+                row,
+                body,
+                created_at,
+                closed_at,
+                merged_at,
+                comments_count,
+                changed_files,
+                labels,
+                assignees,
+                reviews,
+                comments,
+                links,
+                comments_fetched_at,
+            }))
+        })
+    }
+
+    pub fn open_stale(
+        &self,
+        older_than: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, i64, Option<String>)>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT r.owner, r.name, i.number, i.node_id
+                 FROM items i JOIN repos r ON r.id = i.repo_id
+                 WHERE i.state = 'open'
+                   AND (i.last_hydrated_at IS NULL OR i.last_hydrated_at < ?1)
+                 ORDER BY i.last_hydrated_at IS NULL DESC, i.updated_at ASC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![older_than, limit as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn stats(&self) -> Result<DbStats> {
+        self.with(|c| {
+            let prs: i64 =
+                c.query_row("SELECT COUNT(*) FROM items WHERE kind = 'pr'", [], |r| {
+                    r.get(0)
+                })?;
+            let issues: i64 =
+                c.query_row("SELECT COUNT(*) FROM items WHERE kind = 'issue'", [], |r| {
+                    r.get(0)
+                })?;
+            let open: i64 =
+                c.query_row("SELECT COUNT(*) FROM items WHERE state = 'open'", [], |r| {
+                    r.get(0)
+                })?;
+            let unread: i64 =
+                c.query_row("SELECT COUNT(*) FROM items WHERE unread = 1", [], |r| {
+                    r.get(0)
+                })?;
+            let comments: i64 = c.query_row("SELECT COUNT(*) FROM comments", [], |r| r.get(0))?;
+            Ok(DbStats {
+                prs,
+                issues,
+                open,
+                unread,
+                comments,
+            })
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DbStats {
+    pub prs: i64,
+    pub issues: i64,
+    pub open: i64,
+    pub unread: i64,
+    pub comments: i64,
+}
+
+fn migrate(conn: &Connection) -> Result<()> {
+    let version = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "0".into());
+    let v: i64 = version.parse().unwrap_or(0);
+    if v < 2 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS item_review_requests (
+                item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                login   TEXT NOT NULL,
+                PRIMARY KEY (item_id, login)
+            );
+            UPDATE items SET last_hydrated_at = NULL WHERE kind = 'pr' AND state = 'open';
+            INSERT INTO meta(key, value) VALUES ('schema_version', '2')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+        )?;
+    }
+    Ok(())
+}
+
+fn attach_review_progress(c: &Connection, items: &mut [ItemRow]) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = items.iter().map(|i| i.id.to_string()).collect();
+    let in_list = ids.join(",");
+
+    let mut reviews_by: std::collections::HashMap<i64, Vec<Review>> =
+        std::collections::HashMap::new();
+    let mut stmt = c.prepare(&format!(
+        "SELECT item_id, author, state FROM reviews WHERE item_id IN ({in_list})"
+    ))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        reviews_by.entry(id).or_default().push(Review {
+            github_id: None,
+            author: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            state: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            submitted_at: None,
+            body: String::new(),
+        });
+    }
+
+    let mut req_by: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    let mut stmt = c.prepare(&format!(
+        "SELECT item_id, login FROM item_review_requests WHERE item_id IN ({in_list})"
+    ))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        req_by.entry(id).or_default().push(row.get(1)?);
+    }
+
+    for item in items {
+        let reviews = reviews_by.remove(&item.id).unwrap_or_default();
+        let requested = req_by.remove(&item.id).unwrap_or_default();
+        let (approvals, review_total) = review_progress(&reviews, &requested);
+        item.approvals = approvals;
+        item.review_total = review_total;
+    }
+    Ok(())
+}
+
+fn apply_view_filter(sql: &mut String, view: View) {
+    match view {
+        View::Inbox => {
+            sql.push_str(
+                " AND (i.unread = 1 OR (i.state = 'open' AND i.id IN (
+                    SELECT item_id FROM item_roles
+                    WHERE role IN ('review_requested', 'assigned')
+                  )))",
+            );
+        }
+        View::Reviews => {
+            sql.push_str(
+                " AND i.kind = 'pr' AND i.state = 'open' AND i.id IN (
+                    SELECT item_id FROM item_roles
+                    WHERE role IN ('review_requested', 'reviewed')
+                  )",
+            );
+        }
+        View::Mine => {
+            sql.push_str(
+                " AND i.state = 'open' AND i.id IN (
+                    SELECT item_id FROM item_roles WHERE role = 'authored'
+                  )",
+            );
+        }
+        View::Pulls => sql.push_str(" AND i.kind = 'pr'"),
+        View::Issues => sql.push_str(" AND i.kind = 'issue'"),
+        View::All => {}
+        View::Closed => sql.push_str(" AND i.state IN ('closed', 'merged')"),
+    }
+}
+
+fn apply_state_filter(sql: &mut String, q: &ItemQuery) {
+    if !q.view.uses_state_filter() {
+        return;
+    }
+    match q.state {
+        StateFilter::Open => sql.push_str(" AND i.state = 'open'"),
+        StateFilter::Closed => sql.push_str(" AND i.state IN ('closed', 'merged')"),
+        StateFilter::All => {}
+    }
+}
+
+fn apply_time_filter(
+    sql: &mut String,
+    q: &ItemQuery,
+    args: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+) {
+    if !q.view.uses_time_filter() {
+        return;
+    }
+    if let Some(cut) = q.time.cutoff() {
+        sql.push_str(" AND i.updated_at >= ?");
+        args.push(Box::new(
+            cut.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ));
+    }
+}
+
+fn apply_repo_filter(
+    sql: &mut String,
+    q: &ItemQuery,
+    args: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+) {
+    if q.allowed_repos.is_empty() {
+        return;
+    }
+    sql.push_str(" AND (r.owner || '/' || r.name) IN (");
+    for (i, repo) in q.allowed_repos.iter().enumerate() {
+        if i > 0 {
+            sql.push(',');
+        }
+        sql.push('?');
+        args.push(Box::new(repo.clone()));
+    }
+    sql.push(')');
+}
+
+fn apply_search_filter(
+    sql: &mut String,
+    q: &ItemQuery,
+    args: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+) {
+    let needle = q.search.trim();
+    if needle.is_empty() {
+        return;
+    }
+    sql.push_str(
+        " AND (i.title LIKE ? OR (r.owner || '/' || r.name) LIKE ? OR CAST(i.number AS TEXT) LIKE ? OR IFNULL(i.author,'') LIKE ?)",
+    );
+    let pat = format!("%{needle}%");
+    args.push(Box::new(pat.clone()));
+    args.push(Box::new(pat.clone()));
+    args.push(Box::new(pat.clone()));
+    args.push(Box::new(pat));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{HydratedItem, ItemQuery, Kind};
+
+    fn sample(owner: &str, repo: &str, n: i64, kind: Kind, state: ItemState) -> HydratedItem {
+        HydratedItem {
+            node_id: Some(format!("N{owner}{repo}{n}")),
+            owner: owner.into(),
+            repo: repo.into(),
+            number: n,
+            kind,
+            title: format!("title {n}"),
+            body: "fixes #1".into(),
+            state,
+            author: Some("me".into()),
+            draft: false,
+            html_url: format!("https://github.com/{owner}/{repo}/issues/{n}"),
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+            updated_at: Some("2026-08-01T00:00:00Z".into()),
+            closed_at: None,
+            merged_at: None,
+            comments_count: 0,
+            review_decision: None,
+            additions: Some(10),
+            deletions: Some(2),
+            changed_files: Some(1),
+            assignees: vec!["me".into()],
+            labels: vec![Label {
+                name: "bug".into(),
+                color: "ff0000".into(),
+            }],
+            review_requests: vec![],
+            reviews: vec![],
+            links: crate::refs::extract_refs("fixes #1", owner, repo),
+        }
+    }
+
+    #[test]
+    fn upsert_and_inbox() {
+        let db = Db::open(":memory:").unwrap();
+        let item = sample("acme", "box", 12, Kind::Pr, ItemState::Open);
+        let mut roles = BTreeSet::new();
+        roles.insert(Role::Authored);
+        roles.insert(Role::Assigned);
+        db.upsert_item(&item, &roles, true, true).unwrap();
+
+        let mut q = ItemQuery::default();
+        q.view = View::Inbox;
+        let rows = db.list(&q).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary_role(), Role::Authored);
+        assert!(rows[0].unread);
+
+        let detail = db.get_detail(rows[0].id).unwrap().unwrap();
+        assert_eq!(detail.labels.len(), 1);
+        assert!(detail.links.iter().any(|l| l.number == 1));
+
+        let stats = db.stats().unwrap();
+        assert_eq!(stats.prs, 1);
+        assert_eq!(stats.unread, 1);
+    }
+
+    #[test]
+    fn review_summary_counts_requests() {
+        let db = Db::open(":memory:").unwrap();
+        let mut item = sample("acme", "box", 3, Kind::Pr, ItemState::Open);
+        item.reviews = vec![Review {
+            github_id: Some(1),
+            author: "alice".into(),
+            state: "APPROVED".into(),
+            submitted_at: None,
+            body: String::new(),
+        }];
+        item.review_requests = vec!["bob".into(), "carol".into()];
+        item.review_decision = Some("REVIEW_REQUIRED".into());
+        db.upsert_item(&item, &BTreeSet::new(), false, true)
+            .unwrap();
+
+        let mut q = ItemQuery::default();
+        q.view = View::Pulls;
+        q.state = StateFilter::Open;
+        q.time = crate::model::TimeRange::All;
+        let rows = db.list(&q).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].approvals, 1);
+        assert_eq!(rows[0].review_total, 3);
+        assert_eq!(rows[0].review_summary(), "1/3");
+    }
+}
