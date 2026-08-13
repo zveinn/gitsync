@@ -100,3 +100,19 @@ CREATE INDEX IF NOT EXISTS idx_items_kind    ON items(kind);
 CREATE INDEX IF NOT EXISTS idx_items_unread  ON items(unread);
 CREATE INDEX IF NOT EXISTS idx_roles_role    ON item_roles(role);
 CREATE INDEX IF NOT EXISTS idx_items_repo    ON items(repo_id, number);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    github_id    TEXT PRIMARY KEY,
+    unread       INTEGER NOT NULL DEFAULT 0,
+    reason       TEXT,
+    updated_at   TEXT,
+    subject_type TEXT,
+    owner        TEXT,
+    repo         TEXT,
+    number       INTEGER,
+    title        TEXT,
+    item_id      INTEGER REFERENCES items(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_notif_updated ON notifications(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notif_unread  ON notifications(unread);

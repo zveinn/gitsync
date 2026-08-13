@@ -88,7 +88,7 @@ from rotting in the cache — the bug the old `--time` window had to special-cas
 
 ```
  gitsync   zveinn                              30d · open   synced 12s
- All PRs 12   My PRs 7   Closed PRs 40   All Issues 3   Closed Issues 18
+ Inbox 8   All PRs 12   My PRs 7   Closed PRs 40   All Issues 3   Closed Issues 18
 ╭ All PRs  1/12 ───────────────────────────────────────────────────────────╮
 │   role        state    repository              title              age    │
 │ ● Requested   Open     miniohq/aistor#6752     feat: add mem…      3m    │
@@ -113,7 +113,7 @@ from rotting in the cache — the bug the old `--time` window had to special-cas
 | `?` | Help |
 | `q` | Quit |
 
-**All PRs** is open PRs you authored or were asked to review. **All Issues** nests PRs that close or mention each issue, the same way PRs nest their linked issues.
+**Inbox** is the GitHub notification feed (reason, type, repo, title). Background polling still hydrates the matching PRs and issues. **All PRs** is open PRs you authored or were asked to review. **All Issues** nests PRs that close or mention each issue.
 
 ## Config
 

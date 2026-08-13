@@ -358,6 +358,65 @@ pub fn review_progress(reviews: &[Review], requested: &[String]) -> (u32, u32) {
     (approved, slots.len() as u32)
 }
 
+/// One GitHub notification thread, shown in Inbox.
+#[derive(Debug, Clone)]
+pub struct InboxRow {
+    pub github_id: String,
+    pub unread: bool,
+    pub reason: String,
+    pub updated_at: Option<String>,
+    pub subject_type: String,
+    pub owner: String,
+    pub repo: String,
+    pub number: Option<i64>,
+    pub title: String,
+    pub item_id: Option<i64>,
+}
+
+impl InboxRow {
+    pub fn reason_label(&self) -> &str {
+        match self.reason.as_str() {
+            "review_requested" => "review",
+            "approval_requested" => "approve",
+            "mention" => "mention",
+            "team_mention" => "team",
+            "assign" => "assign",
+            "author" => "author",
+            "comment" => "comment",
+            "state_change" => "state",
+            "subscribed" => "watch",
+            "ci_activity" => "ci",
+            "security_alert" => "security",
+            "manual" => "manual",
+            other => other,
+        }
+    }
+
+    pub fn type_label(&self) -> &str {
+        match self.subject_type.as_str() {
+            "PullRequest" => "PR",
+            "Issue" => "Issue",
+            "CheckSuite" | "CheckRun" => "Check",
+            "Release" => "Release",
+            "Discussion" => "Disc",
+            other => other,
+        }
+    }
+
+    pub fn html_url(&self) -> Option<String> {
+        let n = self.number?;
+        let kind = if self.subject_type == "PullRequest" {
+            "pull"
+        } else {
+            "issues"
+        };
+        Some(format!(
+            "https://github.com/{}/{}/{kind}/{n}",
+            self.owner, self.repo
+        ))
+    }
+}
+
 /// Full item + related rows for the detail pane.
 #[derive(Debug, Clone)]
 pub struct ItemDetail {
@@ -378,6 +437,7 @@ pub struct ItemDetail {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
+    Inbox,
     AllPrs,
     MyPrs,
     ClosedPrs,
@@ -386,7 +446,8 @@ pub enum View {
 }
 
 impl View {
-    pub const ALL: [View; 5] = [
+    pub const ALL: [View; 6] = [
+        View::Inbox,
         View::AllPrs,
         View::MyPrs,
         View::ClosedPrs,
@@ -396,6 +457,7 @@ impl View {
 
     pub fn name(self) -> &'static str {
         match self {
+            Self::Inbox => "Inbox",
             Self::AllPrs => "All PRs",
             Self::MyPrs => "My PRs",
             Self::ClosedPrs => "Closed PRs",
@@ -540,7 +602,7 @@ pub struct ItemQuery {
 
 impl Default for View {
     fn default() -> Self {
-        Self::AllPrs
+        Self::Inbox
     }
 }
 
@@ -607,9 +669,9 @@ mod tests {
 
     #[test]
     fn view_shift_wraps() {
-        assert_eq!(View::AllPrs.shift(1), View::MyPrs);
-        assert_eq!(View::AllPrs.shift(-1), View::ClosedIssues);
-        assert_eq!(View::ClosedIssues.shift(1), View::AllPrs);
+        assert_eq!(View::Inbox.shift(1), View::AllPrs);
+        assert_eq!(View::Inbox.shift(-1), View::ClosedIssues);
+        assert_eq!(View::ClosedIssues.shift(1), View::Inbox);
         assert_eq!(View::MyPrs.shift(2), View::AllIssues);
     }
 

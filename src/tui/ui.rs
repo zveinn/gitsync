@@ -122,7 +122,7 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
                 .fg(Color::Black)
                 .bg(Theme::ACCENT)
                 .add_modifier(Modifier::BOLD)
-        } else if view == View::AllPrs && count > 0 {
+        } else if view == View::Inbox && count > 0 {
             Style::new().fg(Theme::AMBER)
         } else {
             Style::new().fg(Theme::MUTED)
@@ -178,7 +178,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let block = pane(focused).title(Span::styled(title, Style::new().fg(Theme::MUTED)));
 
-    if app.items.is_empty() {
+    if app.flat.is_empty() {
         let empty = if app.cfg.has_token() {
             "Nothing here.  r sync   h/l views"
         } else {
@@ -188,6 +188,11 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             Paragraph::new(empty).block(block).fg(Theme::DIM).centered(),
             area,
         );
+        return;
+    }
+
+    if app.query.view == View::Inbox {
+        draw_inbox_table(frame, app, area, block);
         return;
     }
 
@@ -246,6 +251,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .filter_map(|row| match row {
             FlatRow::Item(i) => Some(item_row(&app.items[*i], show_review, compact)),
+            FlatRow::Notif(_) => None,
             FlatRow::Child { parent, link } => {
                 let parent = app.items.get(*parent)?;
                 let link = parent.links.get(*link)?;
@@ -262,6 +268,91 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .highlight_spacing(HighlightSpacing::Never)
         .highlight_symbol("");
     frame.render_stateful_widget(table, area, &mut app.table_state);
+}
+
+fn draw_inbox_table(frame: &mut Frame, app: &mut App, area: Rect, block: Block<'static>) {
+    let compact = area.width < 70;
+    let (widths, header_cells) = if compact {
+        let h = Style::new().fg(Theme::FAINT);
+        (
+            vec![
+                Constraint::Length(1),
+                Constraint::Length(8),
+                Constraint::Min(8),
+                Constraint::Length(5),
+            ],
+            vec![
+                Cell::from(""),
+                Cell::from("reason").style(h),
+                Cell::from("title").style(h),
+                Cell::from("age").style(h),
+            ],
+        )
+    } else {
+        let h = Style::new().fg(Theme::FAINT);
+        (
+            vec![
+                Constraint::Length(1),
+                Constraint::Length(8),
+                Constraint::Length(6),
+                Constraint::Length(22),
+                Constraint::Min(12),
+                Constraint::Length(5),
+            ],
+            vec![
+                Cell::from(""),
+                Cell::from("reason").style(h),
+                Cell::from("type").style(h),
+                Cell::from("repository").style(h),
+                Cell::from("title").style(h),
+                Cell::from("age").style(h),
+            ],
+        )
+    };
+    let rows: Vec<Row> = app.inbox.iter().map(|n| inbox_row(n, compact)).collect();
+    let table = Table::new(rows, widths)
+        .header(Row::new(header_cells).height(1))
+        .block(block)
+        .column_spacing(2)
+        .row_highlight_style(Style::new().bg(Theme::SURFACE).fg(Theme::TEXT))
+        .highlight_spacing(HighlightSpacing::Never)
+        .highlight_symbol("");
+    frame.render_stateful_widget(table, area, &mut app.table_state);
+}
+
+fn inbox_row(n: &crate::model::InboxRow, compact: bool) -> Row<'static> {
+    let unread = if n.unread {
+        Cell::from("●").style(Style::new().fg(Theme::AMBER).bold())
+    } else {
+        Cell::from(" ")
+    };
+    let age = n
+        .updated_at
+        .as_deref()
+        .map(relative_short)
+        .unwrap_or_default();
+    let repo = match n.number {
+        Some(num) => format!("{}/{}#{num}", n.owner, n.repo),
+        None => format!("{}/{}", n.owner, n.repo),
+    };
+    if compact {
+        return Row::new(vec![
+            unread,
+            Cell::from(n.reason_label().to_string()).style(Style::new().fg(Theme::MAGENTA)),
+            Cell::from(n.title.clone()).style(Style::new().fg(Theme::TEXT)),
+            Cell::from(age).style(Style::new().fg(Theme::DIM)),
+        ])
+        .height(1);
+    }
+    Row::new(vec![
+        unread,
+        Cell::from(n.reason_label().to_string()).style(Style::new().fg(Theme::MAGENTA)),
+        Cell::from(n.type_label().to_string()).style(Style::new().fg(Theme::BLUE)),
+        Cell::from(repo).style(Style::new().fg(Theme::BLUE)),
+        Cell::from(n.title.clone()).style(Style::new().fg(Theme::TEXT)),
+        Cell::from(age).style(Style::new().fg(Theme::DIM)),
+    ])
+    .height(1)
 }
 
 fn item_row(item: &ItemRow, show_review: bool, compact: bool) -> Row<'static> {
@@ -356,8 +447,20 @@ fn format_repo(owner: &str, repo: &str, number: i64) -> String {
 fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Detail && app.mode == Mode::Normal;
     let Some(d) = &app.detail else {
+        let hint = if let Some(n) = app.selected_inbox() {
+            format!(
+                "{}\n\n{}  {}  {}#{}\n\nnot in local cache yet — wait for the next poll or press r → this item",
+                n.title,
+                n.reason_label(),
+                n.type_label(),
+                n.repo,
+                n.number.map(|x| x.to_string()).unwrap_or_default()
+            )
+        } else {
+            "Select an item, then press i".into()
+        };
         frame.render_widget(
-            Paragraph::new("Select an item, then press i")
+            Paragraph::new(hint)
                 .block(
                     pane(focused).title(Span::styled(" preview ", Style::new().fg(Theme::MUTED))),
                 )
@@ -678,6 +781,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
 gitsync
 
 Views   (h / l  or  ← →)
+  Inbox         GitHub notifications (not the PRs/issues themselves)
   All PRs       open PRs you authored or were asked to review
   My PRs        open PRs you authored
   Closed PRs    closed / merged PRs  (t time)

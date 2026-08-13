@@ -11,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Config;
 use crate::db::Db;
-use crate::model::{ItemDetail, ItemQuery, ItemRow, StateFilter, TimeRange, View};
+use crate::model::{InboxRow, ItemDetail, ItemQuery, ItemRow, StateFilter, TimeRange, View};
 use crate::sync::{SyncCmd, SyncEvent, SyncKind};
 
 const SYNC_OPTIONS: [&str; 6] = [
@@ -72,6 +72,7 @@ enum StatusKind {
 pub(crate) enum FlatRow {
     Item(usize),
     Child { parent: usize, link: usize },
+    Notif(usize),
 }
 
 pub(crate) struct App {
@@ -81,6 +82,7 @@ pub(crate) struct App {
     cmd_tx: UnboundedSender<SyncCmd>,
     query: ItemQuery,
     items: Vec<ItemRow>,
+    inbox: Vec<InboxRow>,
     flat: Vec<FlatRow>,
     counts: Vec<(View, usize)>,
     selected: usize,
@@ -115,7 +117,7 @@ impl App {
             allowed_repos: cfg.allowed_repos.clone(),
             time: TimeRange::Days(30),
             state: StateFilter::Open,
-            view: View::AllPrs,
+            view: View::Inbox,
             search: String::new(),
         };
         Self {
@@ -125,6 +127,7 @@ impl App {
             cmd_tx,
             query,
             items: Vec::new(),
+            inbox: Vec::new(),
             flat: Vec::new(),
             counts: Vec::new(),
             selected: 0,
@@ -407,11 +410,20 @@ impl App {
             } else {
                 (i + n - 1) % n
             };
-            if let FlatRow::Item(idx) = self.flat[i] {
-                if self.items.get(idx).is_some_and(|it| it.unread) {
-                    self.select_abs(i);
-                    return;
+            match self.flat[i] {
+                FlatRow::Item(idx) => {
+                    if self.items.get(idx).is_some_and(|it| it.unread) {
+                        self.select_abs(i);
+                        return;
+                    }
                 }
+                FlatRow::Notif(idx) => {
+                    if self.inbox.get(idx).is_some_and(|n| n.unread) {
+                        self.select_abs(i);
+                        return;
+                    }
+                }
+                FlatRow::Child { .. } => {}
             }
         }
         self.set_status(StatusKind::Info, "no unread in this view");
@@ -421,17 +433,38 @@ impl App {
         match self.flat.get(self.selected)? {
             FlatRow::Item(i) => self.items.get(*i),
             FlatRow::Child { parent, .. } => self.items.get(*parent),
+            FlatRow::Notif(_) => None,
+        }
+    }
+
+    fn selected_inbox(&self) -> Option<&InboxRow> {
+        match self.flat.get(self.selected)? {
+            FlatRow::Notif(i) => self.inbox.get(*i),
+            _ => None,
         }
     }
 
     fn selected_link(&self) -> Option<&crate::model::IssueLink> {
         match self.flat.get(self.selected)? {
             FlatRow::Child { parent, link } => self.items.get(*parent)?.links.get(*link),
-            FlatRow::Item(_) => None,
+            FlatRow::Item(_) | FlatRow::Notif(_) => None,
         }
     }
 
     fn toggle_read(&mut self) {
+        if let Some(n) = self.selected_inbox().cloned() {
+            let next = !n.unread;
+            if let Err(e) = self.db.set_notif_unread(&n.github_id, next) {
+                self.set_status(StatusKind::Err, e.to_string());
+                return;
+            }
+            self.reload();
+            self.set_status(
+                StatusKind::Ok,
+                if next { "marked unread" } else { "marked read" },
+            );
+            return;
+        }
         let Some(item) = self.current_item().cloned() else {
             return;
         };
@@ -448,6 +481,9 @@ impl App {
     }
 
     fn selected_url(&self) -> Option<String> {
+        if let Some(n) = self.selected_inbox() {
+            return n.html_url();
+        }
         if let Some(link) = self.selected_link() {
             return Some(format!(
                 "https://github.com/{}/issues/{}",
@@ -496,6 +532,20 @@ impl App {
     fn request_comments(&mut self) {
         if self.cfg.offline || !self.cfg.has_token() {
             self.set_status(StatusKind::Warn, "offline / no token");
+            return;
+        }
+        if let Some(n) = self.selected_inbox() {
+            let (Some(number), Some(item_id)) = (n.number, n.item_id) else {
+                self.set_status(StatusKind::Warn, "notification is not a cached issue/PR");
+                return;
+            };
+            let _ = self.cmd_tx.send(SyncCmd::Comments {
+                owner: n.owner.clone(),
+                repo: n.repo.clone(),
+                number,
+                item_id,
+            });
+            self.set_status(StatusKind::Info, "loading comments");
             return;
         }
         if let Some(link) = self.selected_link() {
@@ -558,6 +608,20 @@ impl App {
             self.set_status(StatusKind::Warn, "offline / no token");
             return;
         }
+        if let Some(n) = self.selected_inbox() {
+            let Some(number) = n.number else {
+                self.set_status(StatusKind::Warn, "notification has no issue/PR");
+                return;
+            };
+            let _ = self.cmd_tx.send(SyncCmd::Refresh {
+                owner: n.owner.clone(),
+                repo: n.repo.clone(),
+                number,
+                item_id: n.item_id.unwrap_or(0),
+            });
+            self.set_status(StatusKind::Info, "refreshing item");
+            return;
+        }
         if let Some(link) = self.selected_link() {
             let (owner, repo) = split_repo(&link.repo);
             let _ = self.cmd_tx.send(SyncCmd::Refresh {
@@ -586,7 +650,7 @@ impl App {
             self.close_preview();
             return;
         }
-        if self.items.is_empty() {
+        if self.flat.is_empty() {
             self.set_status(StatusKind::Info, "nothing to preview");
             return;
         }
@@ -625,11 +689,40 @@ impl App {
     }
 
     fn reload(&mut self) {
-        let keep = self.current_item().map(|i| i.id);
-        self.reload_keep(keep.unwrap_or(-1));
+        if self.query.view == View::Inbox {
+            let keep = self.selected_inbox().map(|n| n.github_id.clone());
+            self.reload_inbox(keep.as_deref());
+        } else {
+            let keep = self.current_item().map(|i| i.id);
+            self.reload_keep(keep.unwrap_or(-1));
+        }
+    }
+
+    fn reload_inbox(&mut self, keep_id: Option<&str>) {
+        match self
+            .db
+            .list_notifications(&self.query.search, &self.query.allowed_repos)
+        {
+            Ok(rows) => self.inbox = rows,
+            Err(e) => {
+                self.set_status(StatusKind::Err, format!("db: {e}"));
+                return;
+            }
+        }
+        self.items.clear();
+        self.flat = (0..self.inbox.len()).map(FlatRow::Notif).collect();
+        match self.db.counts_by_view(&self.query) {
+            Ok(c) => self.counts = c,
+            Err(e) => self.set_status(StatusKind::Warn, format!("counts: {e}")),
+        }
+        let idx = keep_id
+            .and_then(|id| self.inbox.iter().position(|n| n.github_id == id))
+            .unwrap_or(0);
+        self.select_abs(idx);
     }
 
     fn reload_keep(&mut self, keep_id: i64) {
+        self.inbox.clear();
         match self.db.list(&self.query) {
             Ok(items) => self.items = items,
             Err(e) => {
@@ -658,6 +751,14 @@ impl App {
                 .get(*parent)
                 .and_then(|p| p.links.get(*link))
                 .and_then(|l| l.to_id),
+            Some(FlatRow::Notif(i)) => {
+                let n = self.inbox.get(*i);
+                n.and_then(|n| n.item_id).or_else(|| {
+                    let n = n?;
+                    let num = n.number?;
+                    self.db.find_item_id(&n.owner, &n.repo, num).ok().flatten()
+                })
+            }
             None => None,
         };
         let Some(id) = id else {

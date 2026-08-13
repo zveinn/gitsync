@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::model::{
-    Comment, HydratedItem, IssueLink, ItemDetail, ItemQuery, ItemRow, ItemState, Kind, Label,
-    LinkKind, Review, Role, StateFilter, View, review_progress,
+    Comment, HydratedItem, InboxRow, IssueLink, ItemDetail, ItemQuery, ItemRow, ItemState, Kind,
+    Label, LinkKind, Review, Role, StateFilter, View, review_progress,
 };
 use crate::timeutil::now_rfc3339;
 
@@ -299,6 +299,157 @@ impl Db {
         })
     }
 
+    pub fn upsert_notification(
+        &self,
+        github_id: &str,
+        unread: bool,
+        reason: &str,
+        updated_at: &str,
+        subject_type: &str,
+        title: &str,
+        owner: &str,
+        repo: &str,
+        number: Option<i64>,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO notifications(
+                    github_id, unread, reason, updated_at, subject_type, title,
+                    owner, repo, number
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(github_id) DO UPDATE SET
+                    unread = excluded.unread,
+                    reason = excluded.reason,
+                    updated_at = excluded.updated_at,
+                    subject_type = excluded.subject_type,
+                    title = excluded.title,
+                    owner = excluded.owner,
+                    repo = excluded.repo,
+                    number = excluded.number",
+                params![
+                    github_id,
+                    unread as i64,
+                    reason,
+                    updated_at,
+                    subject_type,
+                    title,
+                    owner,
+                    repo,
+                    number
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn bind_notification_item(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: i64,
+        item_id: i64,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE notifications SET item_id = ?1
+                 WHERE owner = ?2 AND repo = ?3 AND number = ?4",
+                params![item_id, owner, repo, number],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn set_notif_unread(&self, github_id: &str, unread: bool) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE notifications SET unread = ?1 WHERE github_id = ?2",
+                params![unread as i64, github_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn count_notifications(&self) -> Result<usize> {
+        self.with(|c| {
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))?;
+            Ok(n as usize)
+        })
+    }
+
+    pub fn list_notifications(
+        &self,
+        search: &str,
+        allowed_repos: &[String],
+    ) -> Result<Vec<InboxRow>> {
+        self.with(|c| {
+            let mut sql = String::from(
+                "SELECT github_id, unread, reason, updated_at, subject_type, owner, repo,
+                        number, title, item_id
+                 FROM notifications WHERE 1=1",
+            );
+            let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            if !allowed_repos.is_empty() {
+                sql.push_str(" AND (owner || '/' || repo) IN (");
+                for (i, repo) in allowed_repos.iter().enumerate() {
+                    if i > 0 {
+                        sql.push(',');
+                    }
+                    sql.push('?');
+                    args.push(Box::new(repo.clone()));
+                }
+                sql.push(')');
+            }
+            let needle = search.trim();
+            if !needle.is_empty() {
+                sql.push_str(
+                    " AND (title LIKE ? OR reason LIKE ? OR (owner || '/' || repo) LIKE ? OR CAST(number AS TEXT) LIKE ?)",
+                );
+                let pat = format!("%{needle}%");
+                args.push(Box::new(pat.clone()));
+                args.push(Box::new(pat.clone()));
+                args.push(Box::new(pat.clone()));
+                args.push(Box::new(pat));
+            }
+            sql.push_str(" ORDER BY unread DESC, updated_at DESC");
+            let mut stmt = c.prepare(&sql)?;
+            let refs: Vec<&dyn rusqlite::types::ToSql> =
+                args.iter().map(|a| a.as_ref()).collect();
+            let rows = stmt.query_map(refs.as_slice(), |r| {
+                Ok(InboxRow {
+                    github_id: r.get(0)?,
+                    unread: r.get::<_, i64>(1)? != 0,
+                    reason: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    updated_at: r.get(3)?,
+                    subject_type: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    owner: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    repo: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    number: r.get(7)?,
+                    title: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                    item_id: r.get(9)?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn find_item_id(&self, owner: &str, repo: &str, number: i64) -> Result<Option<i64>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT i.id FROM items i
+                 JOIN repos r ON r.id = i.repo_id
+                 WHERE r.owner = ?1 AND r.name = ?2 AND i.number = ?3",
+                params![owner, repo, number],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("find_item_id")
+        })
+    }
+
     pub fn replace_comments(&self, item_id: i64, comments: &[Comment]) -> Result<()> {
         self.with(|c| {
             let tx = c.unchecked_transaction()?;
@@ -425,6 +576,10 @@ impl Db {
     pub fn counts_by_view(&self, base: &ItemQuery) -> Result<Vec<(View, usize)>> {
         let mut out = Vec::new();
         for view in View::ALL {
+            if view == View::Inbox {
+                out.push((view, self.count_notifications()?));
+                continue;
+            }
             let mut q = base.clone();
             q.view = view;
             if !view.uses_state_filter() {
@@ -694,6 +849,26 @@ fn migrate(conn: &Connection) -> Result<()> {
             ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
         )?;
     }
+    if v < 3 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS notifications (
+                github_id    TEXT PRIMARY KEY,
+                unread       INTEGER NOT NULL DEFAULT 0,
+                reason       TEXT,
+                updated_at   TEXT,
+                subject_type TEXT,
+                owner        TEXT,
+                repo         TEXT,
+                number       INTEGER,
+                title        TEXT,
+                item_id      INTEGER REFERENCES items(id) ON DELETE SET NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_notif_updated ON notifications(updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_notif_unread  ON notifications(unread);
+            INSERT INTO meta(key, value) VALUES ('schema_version', '3')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+        )?;
+    }
     Ok(())
 }
 
@@ -777,6 +952,7 @@ fn attach_links(c: &Connection, items: &mut [ItemRow]) -> Result<()> {
 
 fn apply_view_filter(sql: &mut String, view: View) {
     match view {
+        View::Inbox => sql.push_str(" AND 0"),
         View::AllPrs => {
             sql.push_str(
                 " AND i.kind = 'pr' AND i.state = 'open' AND i.id IN (

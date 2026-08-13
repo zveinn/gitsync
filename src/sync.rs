@@ -103,111 +103,114 @@ pub async fn run_worker(
         });
     }
 
-    while let Some(cmd) = cmd_rx.recv().await {
-        match cmd {
-            SyncCmd::Shutdown => break,
-            SyncCmd::Poll => {
+    let _ = poll_once(&db, &cfg, &client, &ev_tx).await;
+
+    let mut interval = tokio::time::interval(Duration::from_secs(cfg.poll_seconds.max(30)));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    None | Some(SyncCmd::Shutdown) => break,
+                    Some(SyncCmd::Poll) => {
+                        let _ = poll_once(&db, &cfg, &client, &ev_tx).await;
+                    }
+                    Some(SyncCmd::Search { created_days }) => {
+                        let label = match created_days {
+                            Some(d) => format!("sync created last {d}d"),
+                            None => "sync all".into(),
+                        };
+                        emit(
+                            &ev_tx,
+                            SyncEvent::Started {
+                                kind: SyncKind::Search,
+                                message: label,
+                            },
+                        );
+                        match search_created(&db, &cfg, &client, &ev_tx, created_days).await {
+                            Ok(r) => emit(
+                                &ev_tx,
+                                SyncEvent::Finished {
+                                    kind: SyncKind::Search,
+                                    fetched: r.fetched,
+                                    upserted: r.upserted,
+                                    unread: r.unread,
+                                    message: r.message,
+                                },
+                            ),
+                            Err(e) => emit(
+                                &ev_tx,
+                                SyncEvent::Failed {
+                                    kind: SyncKind::Search,
+                                    error: e.to_string(),
+                                },
+                            ),
+                        }
+                        emit_rate(&ev_tx, &client);
+                    }
+                    Some(SyncCmd::Refresh { owner, repo, number, item_id }) => {
+                        emit(
+                            &ev_tx,
+                            SyncEvent::Started {
+                                kind: SyncKind::RefreshItem,
+                                message: format!("refresh {owner}/{repo}#{number}"),
+                            },
+                        );
+                        match refresh_one(&db, &cfg, &client, &owner, &repo, number).await {
+                            Ok(_) => emit(
+                                &ev_tx,
+                                SyncEvent::Finished {
+                                    kind: SyncKind::RefreshItem,
+                                    fetched: 1,
+                                    upserted: 1,
+                                    unread: 0,
+                                    message: format!("refreshed {owner}/{repo}#{number}"),
+                                },
+                            ),
+                            Err(e) => emit(
+                                &ev_tx,
+                                SyncEvent::Failed {
+                                    kind: SyncKind::RefreshItem,
+                                    error: e.to_string(),
+                                },
+                            ),
+                        }
+                        let _ = item_id;
+                    }
+                    Some(SyncCmd::Comments { owner, repo, number, item_id }) => {
+                        emit(
+                            &ev_tx,
+                            SyncEvent::Started {
+                                kind: SyncKind::Comments,
+                                message: format!("comments {owner}/{repo}#{number}"),
+                            },
+                        );
+                        match load_comments(&db, &client, &owner, &repo, number, item_id).await {
+                            Ok(n) => emit(
+                                &ev_tx,
+                                SyncEvent::Finished {
+                                    kind: SyncKind::Comments,
+                                    fetched: 1,
+                                    upserted: n,
+                                    unread: 0,
+                                    message: format!("{n} comments"),
+                                },
+                            ),
+                            Err(e) => emit(
+                                &ev_tx,
+                                SyncEvent::Failed {
+                                    kind: SyncKind::Comments,
+                                    error: e.to_string(),
+                                },
+                            ),
+                        }
+                    }
+                }
+            }
+            _ = interval.tick() => {
                 let _ = poll_once(&db, &cfg, &client, &ev_tx).await;
-            }
-            SyncCmd::Search { created_days } => {
-                let label = match created_days {
-                    Some(d) => format!("sync created last {d}d"),
-                    None => "sync all".into(),
-                };
-                emit(
-                    &ev_tx,
-                    SyncEvent::Started {
-                        kind: SyncKind::Search,
-                        message: label,
-                    },
-                );
-                match search_created(&db, &cfg, &client, &ev_tx, created_days).await {
-                    Ok(r) => emit(
-                        &ev_tx,
-                        SyncEvent::Finished {
-                            kind: SyncKind::Search,
-                            fetched: r.fetched,
-                            upserted: r.upserted,
-                            unread: r.unread,
-                            message: r.message,
-                        },
-                    ),
-                    Err(e) => emit(
-                        &ev_tx,
-                        SyncEvent::Failed {
-                            kind: SyncKind::Search,
-                            error: e.to_string(),
-                        },
-                    ),
-                }
-                emit_rate(&ev_tx, &client);
-            }
-            SyncCmd::Refresh {
-                owner,
-                repo,
-                number,
-                item_id,
-            } => {
-                emit(
-                    &ev_tx,
-                    SyncEvent::Started {
-                        kind: SyncKind::RefreshItem,
-                        message: format!("refresh {owner}/{repo}#{number}"),
-                    },
-                );
-                match refresh_one(&db, &cfg, &client, &owner, &repo, number).await {
-                    Ok(_) => emit(
-                        &ev_tx,
-                        SyncEvent::Finished {
-                            kind: SyncKind::RefreshItem,
-                            fetched: 1,
-                            upserted: 1,
-                            unread: 0,
-                            message: format!("refreshed {owner}/{repo}#{number}"),
-                        },
-                    ),
-                    Err(e) => emit(
-                        &ev_tx,
-                        SyncEvent::Failed {
-                            kind: SyncKind::RefreshItem,
-                            error: e.to_string(),
-                        },
-                    ),
-                }
-                let _ = item_id;
-            }
-            SyncCmd::Comments {
-                owner,
-                repo,
-                number,
-                item_id,
-            } => {
-                emit(
-                    &ev_tx,
-                    SyncEvent::Started {
-                        kind: SyncKind::Comments,
-                        message: format!("comments {owner}/{repo}#{number}"),
-                    },
-                );
-                match load_comments(&db, &client, &owner, &repo, number, item_id).await {
-                    Ok(n) => emit(
-                        &ev_tx,
-                        SyncEvent::Finished {
-                            kind: SyncKind::Comments,
-                            fetched: 1,
-                            upserted: n,
-                            unread: 0,
-                            message: format!("{n} comments"),
-                        },
-                    ),
-                    Err(e) => emit(
-                        &ev_tx,
-                        SyncEvent::Failed {
-                            kind: SyncKind::Comments,
-                            error: e.to_string(),
-                        },
-                    ),
-                }
             }
         }
     }
@@ -404,6 +407,23 @@ async fn incremental(
     let mut upserted = 0u32;
     let mut unread = 0u32;
 
+    for n in &notifs.items {
+        if !repo_allowed(cfg, &n.owner, &n.repo) {
+            continue;
+        }
+        db.upsert_notification(
+            &n.id,
+            n.unread,
+            &n.reason,
+            &n.updated_at,
+            &n.subject_type,
+            &n.title,
+            &n.owner,
+            &n.repo,
+            n.number,
+        )?;
+    }
+
     if notifs.not_modified {
         let extra = refresh_stale_open(db, cfg, client, ev).await?;
         fetched += extra.0;
@@ -425,7 +445,8 @@ async fn incremental(
         if !n.is_item() || !repo_allowed(cfg, &n.owner, &n.repo) {
             continue;
         }
-        let key = format!("{}/{}#{}", n.owner, n.repo, n.number);
+        let number = n.number.unwrap();
+        let key = format!("{}/{}#{}", n.owner, n.repo, number);
         let entry = roles_by_key
             .entry(key)
             .or_insert_with(|| (BTreeSet::new(), false));
@@ -437,9 +458,11 @@ async fn incremental(
         }
         if !refs
             .iter()
-            .any(|r| r.owner == n.owner && r.repo == n.repo && r.number == n.number)
+            .any(|r| r.owner == n.owner && r.repo == n.repo && r.number == number)
         {
-            refs.push(n.item_ref());
+            if let Some(r) = n.item_ref() {
+                refs.push(r);
+            }
         }
     }
 
@@ -456,7 +479,8 @@ async fn incremental(
         for item in &items {
             let key = item.key();
             let (extra, mark_unread) = roles_by_key.remove(&key).unwrap_or_default();
-            persist(db, item, &me, None, Some(&extra), mark_unread)?;
+            let id = persist(db, item, &me, None, Some(&extra), mark_unread)?;
+            db.bind_notification_item(&item.owner, &item.repo, item.number, id)?;
             upserted += 1;
             if mark_unread {
                 unread += 1;

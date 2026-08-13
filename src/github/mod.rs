@@ -34,9 +34,10 @@ pub struct Notification {
     pub reason: String,
     pub updated_at: String,
     pub subject_type: String,
+    pub title: String,
     pub owner: String,
     pub repo: String,
-    pub number: i64,
+    pub number: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -441,13 +442,13 @@ pub struct NotifResult {
 }
 
 impl Notification {
-    pub fn item_ref(&self) -> ItemRef {
-        ItemRef {
+    pub fn item_ref(&self) -> Option<ItemRef> {
+        Some(ItemRef {
             owner: self.owner.clone(),
             repo: self.repo.clone(),
-            number: self.number,
+            number: self.number?,
             node_id: None,
-        }
+        })
     }
 
     pub fn extra_role(&self) -> Option<Role> {
@@ -455,7 +456,7 @@ impl Notification {
     }
 
     pub fn is_item(&self) -> bool {
-        matches!(self.subject_type.as_str(), "Issue" | "PullRequest")
+        self.number.is_some() && matches!(self.subject_type.as_str(), "Issue" | "PullRequest")
     }
 }
 
@@ -484,6 +485,7 @@ struct RawNotification {
 struct RawSubject {
     #[serde(rename = "type")]
     kind: Option<String>,
+    title: Option<String>,
     url: Option<String>,
 }
 
@@ -503,11 +505,8 @@ impl RawNotification {
     fn into_notif(self) -> Option<Notification> {
         let subject = self.subject?;
         let kind = subject.kind.unwrap_or_default();
-        if kind != "Issue" && kind != "PullRequest" {
-            return None;
-        }
         let url = subject.url.unwrap_or_default();
-        let number = url.rsplit('/').next().and_then(|s| s.parse::<i64>().ok())?;
+        let number = url.rsplit('/').next().and_then(|s| s.parse::<i64>().ok());
         let (owner, repo) =
             if let Some(full) = self.repository.as_ref().and_then(|r| r.full_name.clone()) {
                 let mut parts = full.splitn(2, '/');
@@ -523,6 +522,7 @@ impl RawNotification {
             reason: self.reason.unwrap_or_default(),
             updated_at: self.updated_at.unwrap_or_default(),
             subject_type: kind,
+            title: subject.title.unwrap_or_default(),
             owner,
             repo,
             number,
@@ -608,6 +608,7 @@ mod tests {
             updated_at: Some("2026-01-01T00:00:00Z".into()),
             subject: Some(RawSubject {
                 kind: Some("PullRequest".into()),
+                title: Some("Fix it".into()),
                 url: Some("https://api.github.com/repos/acme/box/pulls/42".into()),
             }),
             repository: Some(RawRepo {
@@ -619,7 +620,8 @@ mod tests {
             }),
         };
         let n = raw.into_notif().unwrap();
-        assert_eq!(n.number, 42);
+        assert_eq!(n.number, Some(42));
+        assert_eq!(n.title, "Fix it");
         assert_eq!(n.owner, "acme");
         assert_eq!(n.extra_role(), Some(Role::ReviewRequested));
     }
