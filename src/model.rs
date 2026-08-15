@@ -403,6 +403,7 @@ impl InboxRow {
             "CheckSuite" | "CheckRun" => "Check",
             "Release" => "Release",
             "Discussion" => "Disc",
+            "RepositoryDependabotAlertsThread" | "RepositoryVulnerabilityAlert" => "Alert",
             other => other,
         }
     }

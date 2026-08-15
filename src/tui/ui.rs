@@ -152,7 +152,11 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn pane(focused: bool) -> Block<'static> {
-    let border = if focused { Theme::PURPLE } else { Theme::BORDER };
+    let border = if focused {
+        Theme::PURPLE
+    } else {
+        Theme::BORDER
+    };
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -792,7 +796,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
 gitsync
 
 Views   (h / l  or  ← →)
-  Inbox         GitHub notifications (not the PRs/issues themselves)
+  Inbox         notifications, review requests, assignments waiting on you
   All PRs       open PRs you authored or were asked to review
   My PRs        open PRs you authored
   Closed PRs    closed / merged PRs  (t time)

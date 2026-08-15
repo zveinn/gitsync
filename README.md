@@ -115,7 +115,7 @@ from rotting in the cache — the bug the old `--time` window had to special-cas
 | `?` | Help |
 | `q` | Quit |
 
-**Inbox** is the GitHub notification feed (reason, type, repo, title). Background polling still hydrates the matching PRs and issues. **All PRs** is open PRs you authored or were asked to review. **All Issues** nests PRs that close or mention each issue.
+**Inbox** is GitHub notifications plus open review requests and assignments waiting on you. Background polling still hydrates the matching PRs and issues. **All PRs** is open PRs you authored or were asked to review. **All Issues** nests PRs that close or mention each issue.
 
 ## Config
 
@@ -126,7 +126,7 @@ api_url = "https://api.github.com"
 allowed_repos = []          # empty = everything you are involved in
 poll_seconds = 90
 backfill_days = 90
-participating_only = true   # notifications you participate in, not every watch
+participating_only = false  # true = only threads you participate in
 ```
 
 Database: `~/.gitsync/gitsync.db` (SQLite, WAL).  

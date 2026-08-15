@@ -340,11 +340,6 @@ async fn search_created(
     db.meta_set("last_search_at", &now_rfc3339())?;
     db.meta_set("last_poll_at", &now_rfc3339())?;
 
-    // Overlap the cursor slightly so activity during the backfill is not missed.
-    let since_iso = (Utc::now() - ChronoDuration::minutes(10))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    db.meta_set("notif_since", &since_iso)?;
-
     Ok(SyncReport {
         fetched,
         upserted,
@@ -363,13 +358,28 @@ async fn incremental(
     ev: &std::sync::mpsc::Sender<SyncEvent>,
 ) -> Result<SyncReport> {
     let me = ensure_username(db, cfg, client).await?;
-    let since = db.meta_get("notif_since")?;
-    let etag = db.meta_get("notif_etag")?;
+    let snapshot_done = db.meta_get("notif_snapshot_done")?.as_deref() == Some("1");
+    // First poll must list the whole inbox. `since` from a search backfill is
+    // only ~10 minutes wide, so historical threads never land in Inbox.
+    let since = if snapshot_done {
+        db.meta_get("notif_since")?
+    } else {
+        None
+    };
+    let etag = if snapshot_done {
+        db.meta_get("notif_etag")?
+    } else {
+        None
+    };
 
     emit(
         ev,
         SyncEvent::Progress {
-            message: "notifications".into(),
+            message: if snapshot_done {
+                "notifications".into()
+            } else {
+                "notification inbox".into()
+            },
         },
     );
 
@@ -396,11 +406,35 @@ async fn incremental(
         }
     };
 
+    let mut notifs = notifs;
+    if !snapshot_done && cfg.participating_only && !notifs.not_modified && notifs.items.is_empty() {
+        emit(
+            ev,
+            SyncEvent::Progress {
+                message: "no participating notifications; fetching watched".into(),
+            },
+        );
+        match client.notifications(None, None, false).await {
+            Ok(all) => notifs = all,
+            Err(e) => {
+                emit(
+                    ev,
+                    SyncEvent::Progress {
+                        message: format!("watched notifications failed ({e})"),
+                    },
+                );
+            }
+        }
+    }
+
     if let Some(et) = &notifs.etag {
         db.meta_set("notif_etag", et)?;
     }
     if let Some(secs) = notifs.poll_interval {
         db.meta_set("poll_interval", &secs.to_string())?;
+    }
+    if !snapshot_done && !notifs.not_modified {
+        db.meta_set("notif_snapshot_done", "1")?;
     }
 
     let mut fetched = 1u32;
@@ -496,11 +530,6 @@ async fn incremental(
         .map(str::to_string)
     {
         db.meta_set("notif_since", &newest)?;
-    } else {
-        db.meta_set(
-            "notif_since",
-            &Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        )?;
     }
 
     let extra = refresh_stale_open(db, cfg, client, ev).await?;

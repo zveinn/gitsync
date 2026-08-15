@@ -29,7 +29,7 @@ impl Default for FileConfig {
             allowed_repos: Vec::new(),
             poll_seconds: 90,
             backfill_days: 90,
-            participating_only: true,
+            participating_only: false,
         }
     }
 }
@@ -229,7 +229,7 @@ poll_seconds = 90
 backfill_days = 90
 
 # Only notifications you participate in (not every watched repo)
-participating_only = true
+participating_only = false
 "#
 }
 

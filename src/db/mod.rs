@@ -369,9 +369,13 @@ impl Db {
         })
     }
 
-    pub fn count_notifications(&self) -> Result<usize> {
+    pub fn count_notifications(&self, search: &str, allowed_repos: &[String]) -> Result<usize> {
         self.with(|c| {
-            let n: i64 = c.query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))?;
+            let (inner, args) = inbox_union_sql(search, allowed_repos);
+            let sql = format!("SELECT COUNT(*) FROM ({inner})");
+            let mut stmt = c.prepare(&sql)?;
+            let refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+            let n: i64 = stmt.query_row(refs.as_slice(), |r| r.get(0))?;
             Ok(n as usize)
         })
     }
@@ -382,38 +386,10 @@ impl Db {
         allowed_repos: &[String],
     ) -> Result<Vec<InboxRow>> {
         self.with(|c| {
-            let mut sql = String::from(
-                "SELECT github_id, unread, reason, updated_at, subject_type, owner, repo,
-                        number, title, item_id
-                 FROM notifications WHERE 1=1",
-            );
-            let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-            if !allowed_repos.is_empty() {
-                sql.push_str(" AND (owner || '/' || repo) IN (");
-                for (i, repo) in allowed_repos.iter().enumerate() {
-                    if i > 0 {
-                        sql.push(',');
-                    }
-                    sql.push('?');
-                    args.push(Box::new(repo.clone()));
-                }
-                sql.push(')');
-            }
-            let needle = search.trim();
-            if !needle.is_empty() {
-                sql.push_str(
-                    " AND (title LIKE ? OR reason LIKE ? OR (owner || '/' || repo) LIKE ? OR CAST(number AS TEXT) LIKE ?)",
-                );
-                let pat = format!("%{needle}%");
-                args.push(Box::new(pat.clone()));
-                args.push(Box::new(pat.clone()));
-                args.push(Box::new(pat.clone()));
-                args.push(Box::new(pat));
-            }
-            sql.push_str(" ORDER BY unread DESC, updated_at DESC");
+            let (inner, args) = inbox_union_sql(search, allowed_repos);
+            let sql = format!("{inner} ORDER BY unread DESC, updated_at DESC");
             let mut stmt = c.prepare(&sql)?;
-            let refs: Vec<&dyn rusqlite::types::ToSql> =
-                args.iter().map(|a| a.as_ref()).collect();
+            let refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
             let rows = stmt.query_map(refs.as_slice(), |r| {
                 Ok(InboxRow {
                     github_id: r.get(0)?,
@@ -577,7 +553,10 @@ impl Db {
         let mut out = Vec::new();
         for view in View::ALL {
             if view == View::Inbox {
-                out.push((view, self.count_notifications()?));
+                out.push((
+                    view,
+                    self.count_notifications(&base.search, &base.allowed_repos)?,
+                ));
                 continue;
             }
             let mut q = base.clone();
@@ -950,6 +929,146 @@ fn attach_links(c: &Connection, items: &mut [ItemRow]) -> Result<()> {
     Ok(())
 }
 
+/// GitHub notification threads plus open items waiting on you
+/// (review requested, assigned-but-not-authored, mentioned, unread).
+fn inbox_union_sql(
+    search: &str,
+    allowed_repos: &[String],
+) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+    let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    let mut notifs = String::from(
+        "SELECT github_id, unread, reason, updated_at, subject_type, owner, repo,
+                number, title, item_id
+         FROM notifications WHERE 1=1",
+    );
+    apply_inbox_repo_filter(&mut notifs, "owner", "repo", allowed_repos, &mut args);
+    apply_inbox_search(
+        &mut notifs,
+        "title",
+        "reason",
+        "owner",
+        "repo",
+        "number",
+        search,
+        &mut args,
+    );
+
+    let mut items = String::from(
+        "SELECT printf('local:%d', i.id) AS github_id,
+                i.unread,
+                CASE
+                  WHEN EXISTS (
+                    SELECT 1 FROM item_roles ir
+                    WHERE ir.item_id = i.id AND ir.role = 'review_requested'
+                  ) THEN 'review_requested'
+                  WHEN EXISTS (
+                    SELECT 1 FROM item_roles ir
+                    WHERE ir.item_id = i.id AND ir.role = 'assigned'
+                  ) THEN 'assign'
+                  WHEN EXISTS (
+                    SELECT 1 FROM item_roles ir
+                    WHERE ir.item_id = i.id AND ir.role = 'mentioned'
+                  ) THEN 'mention'
+                  ELSE 'subscribed'
+                END AS reason,
+                i.updated_at,
+                CASE i.kind WHEN 'pr' THEN 'PullRequest' ELSE 'Issue' END AS subject_type,
+                r.owner, r.name AS repo, i.number, i.title, i.id AS item_id
+         FROM items i
+         JOIN repos r ON r.id = i.repo_id
+         WHERE i.state = 'open'
+           AND (
+             i.unread = 1
+             OR i.id IN (
+               SELECT item_id FROM item_roles
+               WHERE role IN ('review_requested', 'mentioned')
+             )
+             OR (
+               i.id IN (SELECT item_id FROM item_roles WHERE role = 'assigned')
+               AND i.id NOT IN (SELECT item_id FROM item_roles WHERE role = 'authored')
+             )
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM notifications n
+             WHERE n.item_id = i.id
+                OR (n.owner = r.owner AND n.repo = r.name AND n.number = i.number)
+           )",
+    );
+    apply_inbox_repo_filter(&mut items, "r.owner", "r.name", allowed_repos, &mut args);
+    apply_inbox_search(
+        &mut items,
+        "i.title",
+        "CASE
+           WHEN EXISTS (
+             SELECT 1 FROM item_roles ir
+             WHERE ir.item_id = i.id AND ir.role = 'review_requested'
+           ) THEN 'review_requested'
+           WHEN EXISTS (
+             SELECT 1 FROM item_roles ir
+             WHERE ir.item_id = i.id AND ir.role = 'assigned'
+           ) THEN 'assign'
+           WHEN EXISTS (
+             SELECT 1 FROM item_roles ir
+             WHERE ir.item_id = i.id AND ir.role = 'mentioned'
+           ) THEN 'mention'
+           ELSE 'subscribed'
+         END",
+        "r.owner",
+        "r.name",
+        "i.number",
+        search,
+        &mut args,
+    );
+
+    (format!("{notifs} UNION ALL {items}"), args)
+}
+
+fn apply_inbox_repo_filter(
+    sql: &mut String,
+    owner_col: &str,
+    repo_col: &str,
+    allowed_repos: &[String],
+    args: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+) {
+    if allowed_repos.is_empty() {
+        return;
+    }
+    sql.push_str(&format!(" AND ({owner_col} || '/' || {repo_col}) IN ("));
+    for (i, repo) in allowed_repos.iter().enumerate() {
+        if i > 0 {
+            sql.push(',');
+        }
+        sql.push('?');
+        args.push(Box::new(repo.clone()));
+    }
+    sql.push(')');
+}
+
+fn apply_inbox_search(
+    sql: &mut String,
+    title_col: &str,
+    reason_col: &str,
+    owner_col: &str,
+    repo_col: &str,
+    number_col: &str,
+    search: &str,
+    args: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+) {
+    let needle = search.trim();
+    if needle.is_empty() {
+        return;
+    }
+    sql.push_str(&format!(
+        " AND ({title_col} LIKE ? OR {reason_col} LIKE ? OR ({owner_col} || '/' || {repo_col}) LIKE ? OR CAST({number_col} AS TEXT) LIKE ?)"
+    ));
+    let pat = format!("%{needle}%");
+    args.push(Box::new(pat.clone()));
+    args.push(Box::new(pat.clone()));
+    args.push(Box::new(pat.clone()));
+    args.push(Box::new(pat));
+}
+
 fn apply_view_filter(sql: &mut String, view: View) {
     match view {
         View::Inbox => sql.push_str(" AND 0"),
@@ -1165,5 +1284,43 @@ mod tests {
                 .any(|l| l.number == 12 && l.kind == LinkKind::Closes),
             "issue should nest the PR that closes it"
         );
+    }
+
+    #[test]
+    fn inbox_includes_review_requests_and_skips_duplicates() {
+        let db = Db::open(":memory:").unwrap();
+        let mine = sample("acme", "box", 1, Kind::Pr, ItemState::Open);
+        let mut authored = BTreeSet::new();
+        authored.insert(Role::Authored);
+        authored.insert(Role::Assigned);
+        db.upsert_item(&mine, &authored, false, true).unwrap();
+
+        let theirs = sample("acme", "box", 2, Kind::Pr, ItemState::Open);
+        let mut requested = BTreeSet::new();
+        requested.insert(Role::ReviewRequested);
+        db.upsert_item(&theirs, &requested, false, true).unwrap();
+
+        let rows = db.list_notifications("", &[]).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].number, Some(2));
+        assert_eq!(rows[0].reason, "review_requested");
+        assert_eq!(db.count_notifications("", &[]).unwrap(), 1);
+
+        db.upsert_notification(
+            "gh-2",
+            true,
+            "review_requested",
+            "2026-08-02T00:00:00Z",
+            "PullRequest",
+            "title 2",
+            "acme",
+            "box",
+            Some(2),
+        )
+        .unwrap();
+        let rows = db.list_notifications("", &[]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].github_id, "gh-2");
+        assert!(rows[0].unread);
     }
 }
