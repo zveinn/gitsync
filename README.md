@@ -34,6 +34,9 @@ distinct items with merge state, review decision, and 82 linked issues.
 
 ## Install
 
+Tagged releases (`v*`) publish Linux, Windows, and macOS binaries on
+[GitHub Releases](https://github.com/zveinn/gitsync/releases/latest).
+
 ```bash
 cargo build --release
 # binary: target/release/gitsync
