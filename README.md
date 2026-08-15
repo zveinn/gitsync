@@ -92,7 +92,7 @@ from rotting in the cache — the bug the old `--time` window had to special-cas
 ╭ All PRs  1/12 ───────────────────────────────────────────────────────────╮
 │   role        state    repository              title              age    │
 │ ● Requested   Open     miniohq/aistor#6752     feat: add mem…      3m    │
-│   ↳ closes    Open     miniohq/aistor#6671     memory analytics          │
+│       closes  Open         miniohq/aistor#6671     memory analytics      │
 ╰──────────────────────────────────────────────────────────────────────────╯
 ```
 

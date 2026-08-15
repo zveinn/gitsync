@@ -142,7 +142,7 @@ impl App {
             mode: Mode::Normal,
             filter_buf: String::new(),
             sync_choice: 0,
-            show_links: true,
+            show_links: false,
             link_override: HashSet::new(),
             status: Status {
                 message: "local cache · syncing in background".into(),

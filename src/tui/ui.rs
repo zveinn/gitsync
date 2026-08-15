@@ -21,7 +21,8 @@ impl Theme {
     const FAINT: Color = Color::Rgb(71, 85, 105);
     const ACCENT: Color = Color::Rgb(56, 189, 248);
     const SURFACE: Color = Color::Rgb(30, 41, 59);
-    const BORDER: Color = Color::Rgb(51, 65, 85);
+    const PURPLE: Color = Color::Rgb(139, 92, 246);
+    const BORDER: Color = Color::Rgb(76, 50, 145);
     const AMBER: Color = Color::Rgb(251, 191, 36);
     const GREEN: Color = Color::Rgb(52, 211, 153);
     const RED: Color = Color::Rgb(248, 113, 113);
@@ -79,7 +80,7 @@ fn draw_title(frame: &mut Frame, app: &App, area: Rect) {
     let left = Line::from(vec![
         Span::styled(
             " gitsync ",
-            Style::new().fg(Color::Black).bg(Theme::ACCENT).bold(),
+            Style::new().fg(Color::Black).bg(Theme::PURPLE).bold(),
         ),
         Span::raw("  "),
         Span::styled(who, Style::new().fg(Theme::TEXT)),
@@ -120,7 +121,7 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
         let style = if selected {
             Style::new()
                 .fg(Color::Black)
-                .bg(Theme::ACCENT)
+                .bg(Theme::PURPLE)
                 .add_modifier(Modifier::BOLD)
         } else if view == View::Inbox && count > 0 {
             Style::new().fg(Theme::AMBER)
@@ -151,11 +152,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn pane(focused: bool) -> Block<'static> {
-    let border = if focused {
-        Theme::ACCENT
-    } else {
-        Theme::BORDER
-    };
+    let border = if focused { Theme::PURPLE } else { Theme::BORDER };
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -350,7 +347,7 @@ fn inbox_row(n: &crate::model::InboxRow, compact: bool) -> Row<'static> {
         unread,
         Cell::from(n.reason_label().to_string()).style(Style::new().fg(Theme::MAGENTA)),
         Cell::from(n.type_label().to_string()).style(Style::new().fg(Theme::BLUE)),
-        Cell::from(repo).style(Style::new().fg(Theme::BLUE)),
+        Cell::from(repo).style(Style::new().fg(Color::White)),
         Cell::from(n.title.clone()).style(Style::new().fg(Theme::TEXT)),
         Cell::from(age).style(Style::new().fg(Theme::DIM)),
     ])
@@ -373,7 +370,7 @@ fn item_row(item: &ItemRow, show_review: bool, compact: bool) -> Row<'static> {
         return Row::new(vec![
             unread,
             Cell::from(format!("{}#{}", item.repo, item.number))
-                .style(Style::new().fg(Theme::BLUE)),
+                .style(Style::new().fg(Color::White)),
             Cell::from(item.title.clone()).style(Style::new().fg(Theme::TEXT)),
         ])
         .height(1);
@@ -383,7 +380,7 @@ fn item_row(item: &ItemRow, show_review: bool, compact: bool) -> Row<'static> {
         Cell::from(role_label(role)).style(Style::new().fg(role_color(role))),
         Cell::from(state_text).style(Style::new().fg(state_fg)),
         Cell::from(format_repo(&item.owner, &item.repo, item.number))
-            .style(Style::new().fg(Theme::BLUE)),
+            .style(Style::new().fg(Color::White)),
         Cell::from(item.title.clone()).style(Style::new().fg(Theme::TEXT)),
         Cell::from(
             item.updated_at
@@ -418,7 +415,7 @@ fn child_row(link: &IssueLink, show_review: bool, compact: bool) -> Row<'static>
         return Row::new(vec![
             Cell::from(" ").style(Style::new().fg(Theme::FAINT)),
             Cell::from(format!("    {}#{}", short_repo(&link.repo), link.number))
-                .style(Style::new().fg(Theme::BLUE)),
+                .style(Style::new().fg(Color::White)),
             Cell::from(format!("    {title}")).style(Style::new().fg(Theme::MUTED)),
         ])
         .height(1);
@@ -428,9 +425,9 @@ fn child_row(link: &IssueLink, show_review: bool, compact: bool) -> Row<'static>
     let mut cells = vec![
         Cell::from(" ").style(Style::new().fg(Theme::FAINT)),
         Cell::from(format!("    {tag}")).style(Style::new().fg(Theme::DIM).italic()),
-        Cell::from(format!("    {state_text}")).style(Style::new().fg(state_fg)),
+        Cell::from(state_text).style(Style::new().fg(state_fg)),
         Cell::from(format!("    {}#{}", link.repo, link.number))
-            .style(Style::new().fg(Theme::BLUE)),
+            .style(Style::new().fg(Color::White)),
         Cell::from(format!("    {title}")).style(Style::new().fg(Theme::MUTED)),
         Cell::from("").style(Style::new().fg(Theme::DIM)),
         Cell::from(""),
@@ -772,7 +769,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             app.items.len()
         )
     };
-    let keys = "r sync   t link   T all links   i preview   y copy   h/l views   j/k   / filter   ?";
+    let keys =
+        "r sync   t link   T all links   i preview   y copy   h/l views   j/k   / filter   ?";
     let line = Line::from(vec![
         Span::styled(format!(" {left} "), Style::new().fg(msg_fg).bg(msg_bg)),
         Span::raw(" "),
@@ -852,7 +850,7 @@ fn draw_sync_menu(frame: &mut Frame, app: &App, area: Rect) {
         let style = if selected {
             Style::new()
                 .fg(Color::Black)
-                .bg(Theme::ACCENT)
+                .bg(Theme::PURPLE)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::new().fg(Theme::TEXT)
@@ -868,7 +866,7 @@ fn draw_sync_menu(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(pane(true).title(Span::styled(" sync ", Style::new().fg(Theme::ACCENT)))),
+            .block(pane(true).title(Span::styled(" sync ", Style::new().fg(Theme::PURPLE)))),
         popup,
     );
 }
