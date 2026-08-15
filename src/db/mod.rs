@@ -387,7 +387,7 @@ impl Db {
     ) -> Result<Vec<InboxRow>> {
         self.with(|c| {
             let (inner, args) = inbox_union_sql(search, allowed_repos);
-            let sql = format!("{inner} ORDER BY unread DESC, updated_at DESC");
+            let sql = format!("{inner} ORDER BY updated_at DESC");
             let mut stmt = c.prepare(&sql)?;
             let refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
             let rows = stmt.query_map(refs.as_slice(), |r| {
@@ -471,7 +471,7 @@ impl Db {
             apply_repo_filter(&mut sql, q, &mut args);
             apply_search_filter(&mut sql, q, &mut args);
 
-            sql.push_str(" ORDER BY i.unread DESC, i.updated_at DESC");
+            sql.push_str(" ORDER BY i.updated_at DESC");
 
             let mut stmt = c.prepare(&sql)?;
             let refs: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
@@ -1200,6 +1200,27 @@ mod tests {
             reviews: vec![],
             links: crate::refs::extract_refs("fixes #1", owner, repo),
         }
+    }
+
+    #[test]
+    fn lists_newest_updated_first() {
+        let db = Db::open(":memory:").unwrap();
+        let mut older = sample("acme", "box", 1, Kind::Pr, ItemState::Open);
+        older.updated_at = Some("2026-01-01T00:00:00Z".into());
+        let mut newer = sample("acme", "box", 2, Kind::Pr, ItemState::Open);
+        newer.updated_at = Some("2026-08-01T00:00:00Z".into());
+        let mut roles = BTreeSet::new();
+        roles.insert(Role::Authored);
+        db.upsert_item(&older, &roles, true, true).unwrap();
+        db.upsert_item(&newer, &roles, false, true).unwrap();
+
+        let mut q = ItemQuery::default();
+        q.view = View::AllPrs;
+        q.time = crate::model::TimeRange::All;
+        let rows = db.list(&q).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].number, 2);
+        assert_eq!(rows[1].number, 1);
     }
 
     #[test]

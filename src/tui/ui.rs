@@ -229,7 +229,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(7),
             Constraint::Length(repo_w),
             Constraint::Min(16),
-            Constraint::Length(5),
+            Constraint::Length(6),
             Constraint::Length(6),
         ];
         let mut header_cells = vec![
@@ -238,7 +238,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             Cell::from("state").style(header_style),
             Cell::from("repository").style(header_style),
             Cell::from("title").style(header_style),
-            Cell::from("age").style(header_style),
+            Cell::from("update").style(header_style),
             Cell::from("linked").style(header_style),
         ];
         if show_review {
@@ -282,13 +282,13 @@ fn draw_inbox_table(frame: &mut Frame, app: &mut App, area: Rect, block: Block<'
                 Constraint::Length(1),
                 Constraint::Length(8),
                 Constraint::Min(8),
-                Constraint::Length(5),
+                Constraint::Length(6),
             ],
             vec![
                 Cell::from(""),
                 Cell::from("reason").style(h),
                 Cell::from("title").style(h),
-                Cell::from("age").style(h),
+                Cell::from("update").style(h),
             ],
         )
     } else {
@@ -300,7 +300,7 @@ fn draw_inbox_table(frame: &mut Frame, app: &mut App, area: Rect, block: Block<'
                 Constraint::Length(6),
                 Constraint::Length(22),
                 Constraint::Min(12),
-                Constraint::Length(5),
+                Constraint::Length(6),
             ],
             vec![
                 Cell::from(""),
@@ -308,7 +308,7 @@ fn draw_inbox_table(frame: &mut Frame, app: &mut App, area: Rect, block: Block<'
                 Cell::from("type").style(h),
                 Cell::from("repository").style(h),
                 Cell::from("title").style(h),
-                Cell::from("age").style(h),
+                Cell::from("update").style(h),
             ],
         )
     };
@@ -329,7 +329,7 @@ fn inbox_row(n: &crate::model::InboxRow, compact: bool) -> Row<'static> {
     } else {
         Cell::from(" ")
     };
-    let age = n
+    let updated = n
         .updated_at
         .as_deref()
         .map(relative_short)
@@ -343,7 +343,7 @@ fn inbox_row(n: &crate::model::InboxRow, compact: bool) -> Row<'static> {
             unread,
             Cell::from(n.reason_label().to_string()).style(Style::new().fg(Theme::MAGENTA)),
             Cell::from(n.title.clone()).style(Style::new().fg(Theme::TEXT)),
-            Cell::from(age).style(Style::new().fg(Theme::DIM)),
+            Cell::from(updated).style(Style::new().fg(Theme::DIM)),
         ])
         .height(1);
     }
@@ -353,7 +353,7 @@ fn inbox_row(n: &crate::model::InboxRow, compact: bool) -> Row<'static> {
         Cell::from(n.type_label().to_string()).style(Style::new().fg(Theme::BLUE)),
         Cell::from(repo).style(Style::new().fg(Color::White)),
         Cell::from(n.title.clone()).style(Style::new().fg(Theme::TEXT)),
-        Cell::from(age).style(Style::new().fg(Theme::DIM)),
+        Cell::from(updated).style(Style::new().fg(Theme::DIM)),
     ])
     .height(1)
 }
