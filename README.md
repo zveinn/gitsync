@@ -3,20 +3,6 @@
 A local-first TUI for the GitHub issues and pull requests you are actually
 involved in.
 
-## Screenshots
-
-Inbox — review requests, assignments, and GitHub notifications, newest first.
-
-![Inbox](docs/screenshots/inbox.png)
-
-All PRs — open PRs you authored or were asked to review, with linked issues nested (`T`).
-
-![All PRs with linked issues](docs/screenshots/all-prs.png)
-
-Preview — `i` opens a right-hand pane with people, review progress, and the body.
-
-![Item preview](docs/screenshots/preview.png)
-
 ## Install
 
 Download the Linux, Windows, or macOS binary from the
@@ -52,6 +38,20 @@ gitsync sync            # one incremental poll, print a summary
 gitsync sync --full     # force the 3-query backfill
 gitsync stats           # local counts
 ```
+
+## Screenshots
+
+Inbox — review requests, assignments, and GitHub notifications, newest first.
+
+![Inbox](docs/screenshots/inbox.png)
+
+All PRs — open PRs you authored or were asked to review, with linked issues nested (`T`).
+
+![All PRs with linked issues](docs/screenshots/all-prs.png)
+
+Preview — `i` opens a right-hand pane with people, review progress, and the body.
+
+![Item preview](docs/screenshots/preview.png)
 
 ## Menus
 
