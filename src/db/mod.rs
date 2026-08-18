@@ -85,59 +85,103 @@ impl Db {
                 )?
             };
 
-            let existing: Option<(i64, Option<String>, i64)> = tx
+            let node_id = item
+                .node_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+
+            let by_node: Option<i64> = if let Some(nid) = node_id {
+                tx.query_row(
+                    "SELECT id FROM items WHERE node_id = ?1",
+                    params![nid],
+                    |r| r.get(0),
+                )
+                .optional()?
+            } else {
+                None
+            };
+            let by_key: Option<i64> = tx
                 .query_row(
-                    "SELECT id, updated_at, unread FROM items WHERE repo_id = ?1 AND number = ?2",
+                    "SELECT id FROM items WHERE repo_id = ?1 AND number = ?2",
                     params![repo_id, item.number],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| r.get(0),
                 )
                 .optional()?;
 
-            let newer = match (&existing, &item.updated_at) {
-                (Some((_, Some(prev), _)), Some(next)) => next.as_str() > prev.as_str(),
+            let id = match (by_node, by_key) {
+                (Some(a), Some(b)) if a != b => {
+                    // Same GitHub node, different repo/number (rename or transfer).
+                    merge_item_into(&tx, b, a)?;
+                    b
+                }
+                (Some(a), _) => a,
+                (None, Some(b)) => b,
+                (None, None) => {
+                    tx.execute(
+                        "INSERT INTO items (repo_id, number, kind, title, state, unread)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                        params![
+                            repo_id,
+                            item.number,
+                            item.kind.as_str(),
+                            item.title,
+                            item.state.as_str()
+                        ],
+                    )?;
+                    tx.last_insert_rowid()
+                }
+            };
+
+            let prior: Option<(Option<String>, i64)> = match (by_node, by_key) {
+                (None, None) => None,
+                _ => tx
+                    .query_row(
+                        "SELECT updated_at, unread FROM items WHERE id = ?1",
+                        params![id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?,
+            };
+            let newer = match (&prior, &item.updated_at) {
+                (Some((Some(prev), _)), Some(next)) => next.as_str() > prev.as_str(),
                 (None, _) => true,
-                _ => false,
+                _ => item.updated_at.is_some(),
             };
             let unread = if mark_unread && newer {
                 1
             } else {
-                existing.map(|(_, _, u)| u).unwrap_or(0)
+                prior.map(|(_, u)| u).unwrap_or(0)
             };
 
             tx.execute(
-                "INSERT INTO items (
-                    repo_id, number, node_id, kind, title, body, state, author, draft, html_url,
-                    created_at, updated_at, closed_at, merged_at, comments_count, review_decision,
-                    additions, deletions, changed_files, unread, last_hydrated_at
-                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                    ?11, ?12, ?13, ?14, ?15, ?16,
-                    ?17, ?18, ?19, ?20, ?21
-                 )
-                 ON CONFLICT(repo_id, number) DO UPDATE SET
-                    node_id = COALESCE(excluded.node_id, items.node_id),
-                    kind = excluded.kind,
-                    title = excluded.title,
-                    body = excluded.body,
-                    state = excluded.state,
-                    author = excluded.author,
-                    draft = excluded.draft,
-                    html_url = excluded.html_url,
-                    created_at = COALESCE(excluded.created_at, items.created_at),
-                    updated_at = excluded.updated_at,
-                    closed_at = excluded.closed_at,
-                    merged_at = excluded.merged_at,
-                    comments_count = excluded.comments_count,
-                    review_decision = excluded.review_decision,
-                    additions = excluded.additions,
-                    deletions = excluded.deletions,
-                    changed_files = excluded.changed_files,
-                    unread = excluded.unread,
-                    last_hydrated_at = excluded.last_hydrated_at",
+                "UPDATE items SET
+                    repo_id = ?1,
+                    number = ?2,
+                    node_id = COALESCE(?3, node_id),
+                    kind = ?4,
+                    title = ?5,
+                    body = ?6,
+                    state = ?7,
+                    author = ?8,
+                    draft = ?9,
+                    html_url = ?10,
+                    created_at = COALESCE(?11, created_at),
+                    updated_at = ?12,
+                    closed_at = ?13,
+                    merged_at = ?14,
+                    comments_count = ?15,
+                    review_decision = ?16,
+                    additions = ?17,
+                    deletions = ?18,
+                    changed_files = ?19,
+                    unread = ?20,
+                    last_hydrated_at = ?21
+                 WHERE id = ?22",
                 params![
                     repo_id,
                     item.number,
-                    item.node_id,
+                    node_id,
                     item.kind.as_str(),
                     item.title,
                     item.body,
@@ -156,13 +200,8 @@ impl Db {
                     item.changed_files,
                     unread,
                     now_rfc3339(),
+                    id,
                 ],
-            )?;
-
-            let id: i64 = tx.query_row(
-                "SELECT id FROM items WHERE repo_id = ?1 AND number = ?2",
-                params![repo_id, item.number],
-                |r| r.get(0),
             )?;
 
             if replace_field_roles {
@@ -929,6 +968,61 @@ fn attach_links(c: &Connection, items: &mut [ItemRow]) -> Result<()> {
     Ok(())
 }
 
+/// Move child rows from `drop_id` onto `keep_id`, then delete `drop_id`.
+/// Used when GitHub renames a repo or transfers an issue/PR (same node_id,
+/// new owner/repo/number).
+fn merge_item_into(tx: &Connection, keep_id: i64, drop_id: i64) -> Result<()> {
+    if keep_id == drop_id {
+        return Ok(());
+    }
+    tracing::info!(keep_id, drop_id, "merging transferred GitHub item");
+    tx.execute(
+        "INSERT OR IGNORE INTO item_roles(item_id, role)
+         SELECT ?1, role FROM item_roles WHERE item_id = ?2",
+        params![keep_id, drop_id],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO item_labels(item_id, name, color)
+         SELECT ?1, name, color FROM item_labels WHERE item_id = ?2",
+        params![keep_id, drop_id],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO item_assignees(item_id, login)
+         SELECT ?1, login FROM item_assignees WHERE item_id = ?2",
+        params![keep_id, drop_id],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO item_review_requests(item_id, login)
+         SELECT ?1, login FROM item_review_requests WHERE item_id = ?2",
+        params![keep_id, drop_id],
+    )?;
+    tx.execute(
+        "UPDATE reviews SET item_id = ?1 WHERE item_id = ?2",
+        params![keep_id, drop_id],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO comments(item_id, github_id, kind, author, body, created_at)
+         SELECT ?1, github_id, kind, author, body, created_at
+         FROM comments WHERE item_id = ?2",
+        params![keep_id, drop_id],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO links(from_id, to_repo, to_number, to_id, kind)
+         SELECT ?1, to_repo, to_number, to_id, kind FROM links WHERE from_id = ?2",
+        params![keep_id, drop_id],
+    )?;
+    tx.execute(
+        "UPDATE links SET to_id = ?1 WHERE to_id = ?2",
+        params![keep_id, drop_id],
+    )?;
+    tx.execute(
+        "UPDATE notifications SET item_id = ?1 WHERE item_id = ?2",
+        params![keep_id, drop_id],
+    )?;
+    tx.execute("DELETE FROM items WHERE id = ?1", params![drop_id])?;
+    Ok(())
+}
+
 /// GitHub notification threads plus open items waiting on you
 /// (review requested, assigned-but-not-authored, mentioned, unread).
 fn inbox_union_sql(
@@ -1305,6 +1399,63 @@ mod tests {
                 .any(|l| l.number == 12 && l.kind == LinkKind::Closes),
             "issue should nest the PR that closes it"
         );
+    }
+
+    #[test]
+    fn rehomes_item_when_github_transfers_node() {
+        let db = Db::open(":memory:").unwrap();
+        let mut old = sample("acme", "old", 10, Kind::Issue, ItemState::Open);
+        old.node_id = Some("ISSUE_abc".into());
+        old.title = "before move".into();
+        let mut roles = BTreeSet::new();
+        roles.insert(Role::Authored);
+        db.upsert_item(&old, &roles, false, true).unwrap();
+
+        let mut moved = sample("acme", "new", 20, Kind::Issue, ItemState::Open);
+        moved.node_id = Some("ISSUE_abc".into());
+        moved.title = "after move".into();
+        db.upsert_item(&moved, &roles, false, true).unwrap();
+
+        let mut q = ItemQuery::default();
+        q.view = View::AllIssues;
+        q.time = crate::model::TimeRange::All;
+        let rows = db.list(&q).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].repo, "new");
+        assert_eq!(rows[0].number, 20);
+        assert_eq!(rows[0].title, "after move");
+        assert_eq!(rows[0].primary_role(), Role::Authored);
+    }
+
+    #[test]
+    fn merges_duplicate_rows_for_same_node() {
+        let db = Db::open(":memory:").unwrap();
+        let mut old = sample("acme", "old", 10, Kind::Pr, ItemState::Open);
+        old.node_id = Some("PR_abc".into());
+        let mut authored = BTreeSet::new();
+        authored.insert(Role::Authored);
+        db.upsert_item(&old, &authored, false, true).unwrap();
+
+        let mut at_dest = sample("acme", "new", 20, Kind::Pr, ItemState::Open);
+        at_dest.node_id = Some("PR_other".into());
+        let mut requested = BTreeSet::new();
+        requested.insert(Role::ReviewRequested);
+        db.upsert_item(&at_dest, &requested, false, true).unwrap();
+
+        let mut incoming = sample("acme", "new", 20, Kind::Pr, ItemState::Open);
+        incoming.node_id = Some("PR_abc".into());
+        incoming.title = "canonical".into();
+        db.upsert_item(&incoming, &requested, false, true).unwrap();
+
+        let mut q = ItemQuery::default();
+        q.view = View::AllPrs;
+        q.time = crate::model::TimeRange::All;
+        let rows = db.list(&q).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].repo, "new");
+        assert_eq!(rows[0].number, 20);
+        assert_eq!(rows[0].title, "canonical");
+        assert!(rows[0].roles.contains(&Role::ReviewRequested));
     }
 
     #[test]
